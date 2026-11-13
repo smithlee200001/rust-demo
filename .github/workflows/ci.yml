@@ -25,10 +25,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
-      # 一个案例失败时仍完成另一个案例，便于一次查看所有检查结果。
+      # 一个案例失败时仍完成其他案例，便于一次查看所有检查结果。
       fail-fast: false
       matrix:
-        demo: [http-sse, multi-processing]
+        demo: [http-sse, log-demo, multi-processing]
     defaults:
       run:
         # 根目录没有 Cargo workspace，所有 Cargo 命令在对应案例中运行。
