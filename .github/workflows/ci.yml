@@ -1,0 +1,57 @@
+name: Rust CI
+
+# 分支开发通过 PR 检查；只对 main 的 push 再检查，避免同一提交重复触发。
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# CI 只读取代码，不需要写入仓库或访问发布凭据。
+permissions:
+  contents: read
+
+# PR 或分支的新提交到达时取消旧检查，避免继续占用运行资源。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Check (${{ matrix.demo }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      # 一个案例失败时仍完成另一个案例，便于一次查看所有检查结果。
+      fail-fast: false
+      matrix:
+        demo: [http-sse, multi-processing]
+    defaults:
+      run:
+        # 根目录没有 Cargo workspace，所有 Cargo 命令在对应案例中运行。
+        working-directory: ${{ matrix.demo }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Check formatting
+        run: cargo fmt --check
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # 缓存依赖和各自的 target；按案例隔离，避免矩阵作业争用同一缓存。
+          workspaces: ${{ matrix.demo }} -> target
+          key: ${{ matrix.demo }}
+          # PR 可恢复 main 缓存，仅 main 写入，减少短期分支的缓存占用。
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Clippy
+        # Clippy 已执行编译检查，无需再增加重复的 cargo check/build 步骤。
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Test
+        # 保留 Cargo 默认测试目标选择；未来新增库时也会运行文档测试。
+        run: cargo test --locked
