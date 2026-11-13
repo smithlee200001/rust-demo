@@ -2,7 +2,7 @@
 
 [工作流](workflows/ci.yml) 在 PR、`main` 分支 push 和手动触发时运行。开发分支请通过 PR 检查，或在 Actions 页面手动选择分支运行；普通开发分支 push 不重复触发检查。同一 PR 或分支的新运行会取消旧运行。
 
-当前在 Ubuntu 上使用 Rust stable，按 `http-sse` 和 `multi-processing` 两个独立 Cargo 工程并行执行：
+当前在 Ubuntu 上使用 Rust stable，按 `http-sse`、`log-demo` 和 `multi-processing` 三个独立 Cargo 工程并行执行；`docs-demo` 仅包含文档样例，不进入 Cargo 检查矩阵：
 
 ```bash
 # 先进入对应案例目录。
