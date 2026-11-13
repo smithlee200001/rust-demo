@@ -67,6 +67,8 @@ curl -N -H 'Last-Event-ID: 10' http://127.0.0.1:3000/sse/metrics
 
 未提供该请求头或值无法解析为无符号整数时，从序号 1 开始。这里仅演示重连后的序号延续，不存储或补发断线期间的历史事件；每条连接独立生成数据。浏览器面板手动断开后再次建立连接会创建新的 `EventSource`，从头开始接收。
 
+序号达到 `u64::MAX` 后结束当前流，避免整数溢出和重复 ID；若请求头已是该最大值，则返回空事件流。要重新开始，可关闭旧连接并创建不带该请求头的新连接。
+
 事件中的 `retry: 3000` 设置浏览器自动重连等待时间为 3 秒。接口还配置了 15 秒空闲心跳，使用 `keep-alive` 注释保活；正常每秒推送指标时通常不会出现心跳。指标流持续发送，可按 `Ctrl+C` 停止 curl。
 
 ### 模拟流式对话
@@ -96,5 +98,10 @@ RUST_LOG=http_sse_demo=debug,axum=info cargo run
 
 ```bash
 cargo fmt
+cargo fmt --check
 cargo check
+cargo clippy --all-targets -- -D warnings
+cargo test
 ```
+
+测试覆盖非法请求头、最大事件序号、中文提示词截断和聊天流完成事件。
