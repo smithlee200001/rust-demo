@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package ipc_bench;
+
+// 模拟浏览器主进程发往渲染子进程的页面加载/快照数据负载
+message BenchPayload {
+  uint64 seq_id = 1;
+  uint32 tab_id = 2;
+  string url = 3;
+  string title = 4;
+  map<string, string> headers = 5;
+  // 可变长度的二进制负载（用于测试小包 256B 与大包 1MB 的性能差异）
+  bytes body_data = 6;
+}
+
+// 子进程处理完成后的统计回执
+message BenchSummary {
+  uint32 worker_pid = 1;
+  uint64 messages_received = 2;
+  uint64 total_bytes_verified = 3;
+}

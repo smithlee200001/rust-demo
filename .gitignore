@@ -1,0 +1,18 @@
+# 忽略所有案例的 Cargo 构建目录，覆盖当前及后续新增的独立 Rust 工程。
+target/
+
+# 保留 Cargo.lock，确保各可执行示例使用一致的依赖版本。
+
+# 忽略 rustfmt 在启用备份选项时生成的 Rust 源文件备份。
+**/*.rs.bk
+
+# 忽略 macOS Finder 生成的目录元数据和 AppleDouble 伴随文件。
+.DS_Store
+._*
+
+# 忽略编辑器的本地配置、交换文件和临时备份。
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

@@ -1,0 +1,21 @@
+[package]
+name = "rust-demo"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ipc-channel = "0.18"
+prost = "0.13"
+serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "sync",
+    "io-std",
+    "io-util",
+    "time",
+] }
+
+[build-dependencies]
+prost-build = "0.13"
+protoc-bin-vendored = "3.1"
