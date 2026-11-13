@@ -15,7 +15,7 @@ multi-processing/
 ├── Cargo.lock
 ├── build.rs            # 编译 Protobuf 消息定义
 ├── proto/              # Protobuf 协议文件
-└── src/                # 示例源码
+└── src/                # 示例源码；process_support.rs 负责握手超时、错误类型及基准子进程回收
 ```
 
 ## 环境准备
@@ -46,6 +46,10 @@ cargo run
 
 例如，先输入 `spawn`，等待子进程就绪后输入 `load https://www.rust-lang.org`，查看返回结果，最后使用 `quit` 退出。
 
+标准输入结束（EOF）或读取失败也会触发清理。未连接的工作进程握手等待窗口为 5 秒；已连接的本地工作进程应立即发送握手消息。关闭 Renderer 时先尝试发送关闭指令，发送成功后最多等待 2 秒退出，再尝试强制终止并回收。同步 IPC 发送和进程等待放在阻塞线程池中执行。
+
+IPC、解码和参数错误通过英文错误信息报告。基准测试提前失败时会终止并回收已启动的子进程。该案例面向协作的本地工作进程，握手看门狗不提供针对任意客户端的完整读写超时机制。
+
 ## 运行性能对比
 
 在 `multi-processing` 目录下执行：
@@ -65,11 +69,18 @@ cargo run --release -- --bench
 
 测试覆盖 256 B 消息体（5,000 次）和 512 KiB 消息体（200 次）两种场景，输出总耗时、平均每条消息耗时和吞吐量。消息体大小不包含其他字段及序列化开销；结果用于当前环境下的方案比较。
 
+吞吐量以 Protobuf 参考大小按 MiB/s 计算，方案三实际使用 bincode，因此该指标不是物理链路吞吐量。共享内存方案通过句柄共享编码数据，写入共享内存和解码拥有所有权的字段仍有复制，并非端到端零拷贝。
+
 ## 格式化与检查
 
 在 `multi-processing` 目录下执行：
 
 ```bash
 cargo fmt
+cargo fmt --check
 cargo check
+cargo clippy --all-targets -- -D warnings
+cargo test
 ```
+
+测试覆盖统计值边界、非法迭代次数、正常握手和未连接超时；运行握手测试需要允许本机 IPC。

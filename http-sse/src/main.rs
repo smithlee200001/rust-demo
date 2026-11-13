@@ -1,7 +1,7 @@
-//! 基于 Axum 的 HTTP/SSE (Server-Sent Events) 完整示例。
+//! 基于 Axum 的 HTTP/SSE (Server-Sent Events) 示例。
 //!
 //! 本示例展示了两种最常见的 SSE 应用场景：
-//! 1. `/sse/metrics`：模拟服务器实时监控指标推送，支持 `Last-Event-ID` 断线续传与心跳保活。
+//! 1. `/sse/metrics`：模拟服务器实时监控指标推送，支持 `Last-Event-ID` 序号延续与心跳保活（不补发历史数据）。
 //! 2. `/sse/chat`：模拟 AI 大模型流式打字机输出，逐 Token 推送并在结束时发送完成事件。
 //! 3. `/`：内置单页 HTML 测试面板，可在浏览器中直观查看两种 SSE 流式效果。
 
@@ -38,7 +38,7 @@ struct MetricPayload {
 /// AI 流式对话接口的查询参数。
 #[derive(Debug, Deserialize)]
 struct ChatQuery {
-    /// 用户输入的提示词（可选，若为空则使用默认提示词）。
+    /// 用户输入的提示词（可选，未提供时使用默认提示词，空字符串按原样回显）。
     prompt: Option<String>,
 }
 
@@ -51,8 +51,9 @@ struct ChatTokenPayload {
     index: usize,
 }
 
+/// 启动本机 HTTP 服务；绑定或服务错误向调用方返回，Ctrl+C 时由操作系统结束进程并关闭连接。
 #[tokio::main]
-async fn main() {
+async fn main() -> std::io::Result<()> {
     // 初始化日志订阅器，默认输出 INFO 级别及以上的英文日志
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -68,20 +69,23 @@ async fn main() {
         .route("/sse/chat", get(sse_chat_handler));
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    // 绑定成功后再输出启动日志，避免端口冲突时误报服务已启动。
+    let listener = tokio::net::TcpListener::bind(addr).await.map_err(|err| {
+        std::io::Error::new(
+            err.kind(),
+            format!("Failed to bind TCP listener on {addr}: {err}"),
+        )
+    })?;
     info!("Starting HTTP/SSE server on http://{}", addr);
     info!(
         "Open http://{} in your browser or run: curl -N http://{}/sse/metrics",
         addr, addr
     );
 
-    // 绑定 TCP 监听端口并启动 HTTP 服务
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .expect("Failed to bind TCP listener on 127.0.0.1:3000");
-
+    // SSE 指标流可能无限持续，保留 Ctrl+C 的进程退出行为，由操作系统关闭连接。
     axum::serve(listener, app)
         .await
-        .expect("HTTP server encountered an unexpected fatal error");
+        .map_err(|err| std::io::Error::other(format!("HTTP server failed: {err}")))
 }
 
 /// 实时监控指标 SSE 处理器（`GET /sse/metrics`）。
@@ -91,37 +95,40 @@ async fn main() {
 ///
 /// # 关键逻辑与边界条件
 /// - 若请求头中存在合法的 `Last-Event-ID`（无符号整数），则从 `Last-Event-ID + 1` 继续推送；
-///   若不存在或解析失败，则默认从序号 `1` 开始推送。
+///   若不存在或解析失败，则默认从序号 `1` 开始推送；已达到 u64 上限时结束流。
 /// - 每隔 1 秒推送一次 `event: metric` 事件，每条消息带有唯一 `id` 和 `retry: 3000`（重连等待 3 秒）。
 /// - 配置 `KeepAlive`：若流空闲超过 15 秒，自动发送 `: keep-alive` 注释行防止代理超时断开。
 async fn sse_metrics_handler(
     headers: HeaderMap,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    // 解析 Last-Event-ID 请求头，支持断线重连后从上次断开的序号继续发送
+    // 只延续序号，不恢复历史数据；checked_add 防止上限处反复产生重复 ID。
     let start_seq = headers
         .get("last-event-id")
         .and_then(|val| val.to_str().ok())
         .and_then(|s| match s.parse::<u64>() {
-            Ok(id) => Some(id.saturating_add(1)),
+            Ok(id) => Some(id.checked_add(1)),
             Err(_) => {
                 warn!("Received invalid Last-Event-ID header value: {}", s);
                 None
             }
         })
-        .unwrap_or(1);
+        .unwrap_or(Some(1));
 
     info!(
-        "Client connected to /sse/metrics (starting sequence ID: {})",
+        "Client connected to /sse/metrics (starting sequence ID: {:?})",
         start_seq
     );
 
     // 使用 unfold 构建异步无限流，每次迭代生成一条指标数据并等待 1 秒
-    let stream = stream::unfold(start_seq, |seq| async move {
+    let stream = stream::unfold(start_seq, |next_seq| async move {
+        // 无可用序号时立即结束流，避免溢出及重复事件 ID。
+        let seq = next_seq?;
         tokio::time::sleep(Duration::from_secs(1)).await;
 
         // 计算伪随机的 CPU 与内存模拟指标（利用三角函数与取模避免引入额外随机数库）
         let cpu_usage = 25.0 + ((seq as f32 * 0.7).sin().abs() * 55.0);
-        let memory_mb = 512 + (seq * 13) % 256;
+        // 先取模再乘法，保持原计算结果，同时避免外部序号过大导致溢出。
+        let memory_mb = 512 + (seq % 256 * 13) % 256;
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -145,8 +152,8 @@ async fn sse_metrics_handler(
                 Event::default().event("error").data("Serialization error")
             });
 
-        // unfold 返回当前产出的元素以及下一次迭代的状态（seq + 1，使用 saturating_add 防止溢出）
-        Some((Ok(event), seq.saturating_add(1)))
+        // 发送最大序号后结束流；不回绕，也不重复最大 ID。
+        Some((Ok(event), seq.checked_add(1)))
     });
 
     // 包装为 Sse 响应并开启心跳保活机制
@@ -207,7 +214,10 @@ async fn sse_chat_handler(
                 .id(index.to_string())
                 .event("token")
                 .json_data(payload)
-                .unwrap_or_else(|_| Event::default().data("{}"));
+                .unwrap_or_else(|err| {
+                    warn!("Failed to serialize chat token: {err}");
+                    Event::default().event("error").data("Serialization error")
+                });
             Ok(event)
         })
         // 末尾追加一条 `event: done` 结束标志事件，方便前端关闭连接
@@ -307,4 +317,83 @@ async fn index_handler() -> Html<&'static str> {
 </body>
 </html>"#,
     )
+}
+
+/// 从 HTTP 响应层验证事件格式和极端请求头，覆盖真实 SSE 序列化路径。
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{body::to_bytes, response::IntoResponse};
+
+    /// 最大序号之前的一次重连只能收到最后一个事件，然后结束，且指标计算不溢出。
+    #[tokio::test]
+    async fn metrics_stop_after_maximum_id() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "last-event-id",
+            (u64::MAX - 1).to_string().parse().expect("Valid header"),
+        );
+        let response = sse_metrics_handler(headers).await.into_response();
+        let bytes = to_bytes(response.into_body(), 8192)
+            .await
+            .expect("Valid SSE response");
+        let text = String::from_utf8(bytes.to_vec()).expect("UTF-8 SSE response");
+        assert!(text.contains(&format!("id: {}", u64::MAX)));
+        assert!(text.contains("event: metric"));
+        assert!(text.contains("\"memory_mb\":755"));
+        assert_eq!(text.matches("event: metric").count(), 1);
+    }
+
+    /// 已耗尽序号时立即结束流，不再重复推送相同 ID。
+    #[tokio::test]
+    async fn metrics_end_when_last_id_is_exhausted() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "last-event-id",
+            u64::MAX.to_string().parse().expect("Valid header"),
+        );
+        let response = sse_metrics_handler(headers).await.into_response();
+        let bytes = to_bytes(response.into_body(), 8192)
+            .await
+            .expect("Valid empty response");
+        assert!(bytes.is_empty());
+    }
+
+    /// 非法请求头回退到序号 1，且仍输出客户端需要的事件名与重连间隔。
+    #[tokio::test]
+    async fn metrics_invalid_header_starts_at_one() {
+        let mut headers = HeaderMap::new();
+        headers.insert("last-event-id", "invalid".parse().expect("Valid header"));
+        let mut stream = sse_metrics_handler(headers)
+            .await
+            .into_response()
+            .into_body()
+            .into_data_stream();
+        let bytes = futures_util::StreamExt::next(&mut stream)
+            .await
+            .expect("First event")
+            .expect("Valid event");
+        let text = String::from_utf8(bytes.to_vec()).expect("UTF-8 SSE response");
+        assert!(text.contains("id: 1\n"));
+        assert!(text.contains("retry: 3000"));
+        assert!(text.contains("event: metric"));
+    }
+
+    /// 多字节提示词按字符截断，流中包含 token 事件与唯一的完成标记。
+    #[tokio::test]
+    async fn chat_limits_unicode_prompt_and_finishes() {
+        let response = sse_chat_handler(Query(ChatQuery {
+            prompt: Some("你".repeat(101)),
+        }))
+        .await
+        .into_response();
+        let bytes = to_bytes(response.into_body(), 16384)
+            .await
+            .expect("Valid chat response");
+        let text = String::from_utf8(bytes.to_vec()).expect("UTF-8 SSE response");
+        assert_eq!(text.matches('你').count(), 100);
+        assert!(text.contains("event: token"));
+        assert_eq!(text.matches("event: done").count(), 1);
+        assert!(text.contains("data: [DONE]"));
+    }
 }

@@ -11,8 +11,9 @@
 //!      向 Tokio 主协程实时推送子进程消息（含 Protobuf + `IpcSharedMemory`）与断连事件（`ChannelClosed`）。
 //! 3. **异步非阻塞握手（`tokio::task::spawn_blocking`）**：
 //!    - 当用户输入 `spawn` 动态拉起新 `Renderer` 子进程时，将阻塞式的 `IpcOneShotServer::accept()`
-//!      提交到 Tokio 的 `spawn_blocking` 线程池中执行，主事件循环 0 毫秒阻塞。
+//!      提交到 Tokio 的 `spawn_blocking` 线程池中执行，避免在主异步任务中等待握手。
 
+use crate::process_support::{DemoResult, accept_worker};
 use crate::proto::BenchPayload;
 use ipc_channel::ipc::{
     self, IpcOneShotServer, IpcReceiver, IpcReceiverSet, IpcSelectionResult, IpcSender,
@@ -56,7 +57,7 @@ pub enum BrowserToRendererCmd {
 pub enum RendererToBrowserEvent {
     /// 子进程启动完成并上报操作系统 PID
     Ready { worker_id: u32, pid: u32 },
-    /// 子进程已完成页面渲染，携带存放于零拷贝共享内存中的 Protobuf 数据
+    /// 子进程已完成页面渲染，携带存放于共享内存中的 Protobuf 数据
     PageRendered {
         worker_id: u32,
         seq_id: u64,
@@ -84,6 +85,8 @@ enum MainToIpcThreadCtrl {
 /// 专职 IPC 线程上报给 Tokio 主协程的事件（经由 `tokio::sync::mpsc::unbounded_channel` 传递）
 #[derive(Debug)]
 enum IpcThreadToMainEvent {
+    /// IPC 线程无法继续工作，主程序收到后进入统一清理流程。
+    IpcThreadFailed { reason: String },
     /// 异步握手完成：新创建的 Renderer 子进程已完成 IPC 连接建立
     HandshakeCompleted {
         worker_id: u32,
@@ -125,7 +128,7 @@ enum TerminalCmd {
     EmptyLine,
     /// 用户输入了无法识别的命令
     Unknown(String),
-    /// 退出整个程序（唯一触发主程序退出的指令）
+    /// 主动退出程序；标准输入结束或读取失败也会触发清理
     Quit,
 }
 
@@ -156,17 +159,30 @@ struct RendererProcessInfo {
 fn spawn_dedicated_ipc_thread(
     ctrl_rx: IpcReceiver<MainToIpcThreadCtrl>,
     event_to_main_tx: UnboundedSender<IpcThreadToMainEvent>,
-) -> JoinHandle<()> {
+) -> std_io::Result<JoinHandle<()>> {
     thread::Builder::new()
         .name("ipc-io-thread".into())
         .spawn(move || {
-            let mut receiver_set =
-                IpcReceiverSet::new().expect("Failed to initialize IpcReceiverSet in IPC thread");
+            let mut receiver_set = match IpcReceiverSet::new() {
+                Ok(set) => set,
+                Err(err) => {
+                    let _ = event_to_main_tx.send(IpcThreadToMainEvent::IpcThreadFailed {
+                        reason: format!("Failed to initialize receiver set: {err}"),
+                    });
+                    return;
+                }
+            };
 
             // 1. 将主协程的控制唤醒通道加入 IpcReceiverSet，记录其唯一内核 ID (ctrl_set_id)
-            let ctrl_set_id = receiver_set
-                .add(ctrl_rx)
-                .expect("Failed to add control channel to IpcReceiverSet");
+            let ctrl_set_id = match receiver_set.add(ctrl_rx) {
+                Ok(id) => id,
+                Err(err) => {
+                    let _ = event_to_main_tx.send(IpcThreadToMainEvent::IpcThreadFailed {
+                        reason: format!("Failed to register control channel: {err}"),
+                    });
+                    return;
+                }
+            };
 
             // 2. 维护 IpcReceiverSet 内部通道 ID -> 子进程 worker_id 的映射表
             let mut rx_id_to_worker: HashMap<u64, u32> = HashMap::new();
@@ -178,7 +194,9 @@ fn spawn_dedicated_ipc_thread(
                 let results = match receiver_set.select() {
                     Ok(res) => res,
                     Err(err) => {
-                        eprintln!("[IPC-Thread] Error in IpcReceiverSet::select(): {err:?}");
+                        let _ = event_to_main_tx.send(IpcThreadToMainEvent::IpcThreadFailed {
+                            reason: format!("Failed to poll receiver set: {err}"),
+                        });
                         break;
                     }
                 };
@@ -187,9 +205,14 @@ fn spawn_dedicated_ipc_thread(
                     match event {
                         // 情况 A：收到主协程发来的控制指令（通过 ctrl_set_id 识别）
                         IpcSelectionResult::MessageReceived(id, raw_msg) if id == ctrl_set_id => {
-                            let ctrl_cmd: MainToIpcThreadCtrl = raw_msg
-                                .to::<MainToIpcThreadCtrl>()
-                                .expect("Failed to deserialize MainToIpcThreadCtrl");
+                            // 坏消息不能使整个 IPC 线程崩溃；记录错误后继续处理其他通道。
+                            let ctrl_cmd = match raw_msg.to::<MainToIpcThreadCtrl>() {
+                                Ok(command) => command,
+                                Err(err) => {
+                                    eprintln!("[IPC-Thread] Invalid control message: {err}");
+                                    continue;
+                                }
+                            };
 
                             match ctrl_cmd {
                                 MainToIpcThreadCtrl::RegisterRenderer {
@@ -206,9 +229,10 @@ fn spawn_dedicated_ipc_thread(
                                             );
                                         }
                                         Err(e) => {
-                                            eprintln!(
-                                                "[IPC-Thread] Failed to add Renderer #{worker_id} to IpcReceiverSet: {e:?}"
-                                            );
+                                            let _ = event_to_main_tx.send(IpcThreadToMainEvent::HandshakeFailed {
+                                                worker_id,
+                                                reason: format!("Failed to register renderer receiver: {e}"),
+                                            });
                                         }
                                     }
                                 }
@@ -236,9 +260,15 @@ fn spawn_dedicated_ipc_thread(
                                         url,
                                         proto_shm,
                                     }) => {
-                                        // 在专职 IPC 线程中直接完成零拷贝共享内存的 Protobuf 解码
-                                        let decoded = BenchPayload::decode(&proto_shm[..])
-                                            .expect("Failed to decode Protobuf in IPC thread");
+                                        // 在专职 IPC 线程中直接完成共享内存的 Protobuf 解码
+                                        // 从共享内存读取编码字节；解码后的字段仍需分配与复制。
+                                        let decoded = match BenchPayload::decode(&proto_shm[..]) {
+                                            Ok(payload) => payload,
+                                            Err(err) => {
+                                                eprintln!("[IPC-Thread] Invalid Protobuf from Renderer #{worker_id}: {err}");
+                                                continue;
+                                            }
+                                        };
                                         let _ = event_to_main_tx.send(
                                             IpcThreadToMainEvent::RendererPageDone {
                                                 worker_id,
@@ -279,7 +309,6 @@ fn spawn_dedicated_ipc_thread(
                 }
             }
         })
-        .expect("Failed to spawn dedicated ipc-io-thread")
 }
 
 /// 使用 `tokio::task::spawn_blocking` 在后台阻塞线程池中完成新子进程的 `IpcOneShotServer` 握手
@@ -287,19 +316,31 @@ fn spawn_dedicated_ipc_thread(
 /// 参数说明：
 /// - `worker_id`: 新创建的子进程逻辑编号
 /// - `server`: 一次性握手服务端实例
+/// - `server_name`: 服务端令牌，供未连接超时后的取消唤醒使用
 /// - `ipc_ctrl_tx`: 发往专职 IPC 线程的控制通道发送端
 /// - `event_to_main_tx`: 发往 Tokio 主协程的事件通道发送端
+///
+/// 返回阻塞任务句柄，主程序退出前等待其完成；失败通过事件上报。
 fn spawn_renderer_handshake_tokio(
     worker_id: u32,
-    server: IpcOneShotServer<IpcSender<BrowserToRendererCmd>>,
+    server: IpcOneShotServer<Option<IpcSender<BrowserToRendererCmd>>>,
+    server_name: String,
     ipc_ctrl_tx: IpcSender<MainToIpcThreadCtrl>,
     event_to_main_tx: UnboundedSender<IpcThreadToMainEvent>,
-) {
-    tokio::task::spawn_blocking(move || match server.accept() {
-        Ok((_, cmd_tx)) => {
+) -> tokio::task::JoinHandle<()> {
+    tokio::task::spawn_blocking(move || match accept_worker(server, &server_name) {
+        Ok(cmd_tx) => {
             // 创建该 Renderer 子进程专属的事件上报通道
-            let (event_tx, event_rx) = ipc::channel::<RendererToBrowserEvent>()
-                .expect("Failed to create renderer event channel");
+            let (event_tx, event_rx) = match ipc::channel::<RendererToBrowserEvent>() {
+                Ok(channel) => channel,
+                Err(err) => {
+                    let _ = event_to_main_tx.send(IpcThreadToMainEvent::HandshakeFailed {
+                        worker_id,
+                        reason: format!("Failed to create renderer event channel: {err}"),
+                    });
+                    return;
+                }
+            };
 
             // 1. 先将该子进程的接收端 event_rx 发送给专职 IPC 线程，动态挂载进 IpcReceiverSet
             if let Err(e) = ipc_ctrl_tx.send(MainToIpcThreadCtrl::RegisterRenderer {
@@ -335,7 +376,7 @@ fn spawn_renderer_handshake_tokio(
                 reason: format!("IpcOneShotServer accept failed: {e}"),
             });
         }
-    });
+    })
 }
 
 // ============================================================================
@@ -420,23 +461,24 @@ fn print_help_banner() {
 /// 打印命令行提示符并刷新标准输出缓冲区
 fn print_prompt() {
     print!("browser> ");
-    let _ = std_io::stdout().flush();
+    if let Err(err) = std_io::stdout().flush() {
+        eprintln!("Failed to flush terminal prompt: {err}");
+    }
 }
 
 // ============================================================================
 // Tokio 主事件循环（`#[tokio::main]` + `tokio::select!`）
 // ============================================================================
 
-/// 启动基于 `tokio::select!` 的交互式多进程浏览器主程序
+/// 启动交互式主程序；初始化失败返回错误，quit 或 EOF 时回收子进程、握手任务与 IPC 线程。
 #[tokio::main]
-pub async fn run_interactive_browser() {
+pub async fn run_interactive_browser() -> DemoResult<()> {
     print_help_banner();
 
-    let current_exe = env::current_exe().expect("Failed to get current executable path");
+    let current_exe = env::current_exe()?;
 
     // 1. 创建主协程与专职 IPC 线程之间的控制唤醒通道（用于动态挂载新创建的 Renderer 通道）
-    let (ipc_ctrl_tx, ipc_ctrl_rx) =
-        ipc::channel::<MainToIpcThreadCtrl>().expect("Failed to create IPC thread control channel");
+    let (ipc_ctrl_tx, ipc_ctrl_rx) = ipc::channel::<MainToIpcThreadCtrl>()?;
 
     // 2. 创建专职 IPC 线程向 Tokio 主协程汇报事件的异步无界通道
     let (ipc_event_tx, mut ipc_event_rx): (
@@ -445,7 +487,7 @@ pub async fn run_interactive_browser() {
     ) = mpsc::unbounded_channel();
 
     // 3. 启动专职 IPC 线程（ipc-io-thread）
-    let ipc_thread_handle = spawn_dedicated_ipc_thread(ipc_ctrl_rx, ipc_event_tx.clone());
+    let ipc_thread_handle = spawn_dedicated_ipc_thread(ipc_ctrl_rx, ipc_event_tx.clone())?;
 
     // 4. 创建 Tokio 异步标准输入行读取器（无需再创建单独的 Stdin 阻塞线程）
     let mut stdin_lines = BufReader::new(tokio_io::stdin()).lines();
@@ -454,6 +496,10 @@ pub async fn run_interactive_browser() {
     let mut active_renderers: HashMap<u32, RendererProcessInfo> = HashMap::new();
     let mut next_worker_id: u32 = 0;
     let mut next_seq_id: u64 = 1;
+    // 保存握手任务，以便退出前等待其完成或触发未连接超时。
+    let mut handshake_tasks = Vec::new();
+    // 致命 IPC 错误在清理完成后返回，避免误报正常退出。
+    let mut failure = None;
 
     print_prompt();
 
@@ -473,6 +519,7 @@ pub async fn run_interactive_browser() {
                     }
                     Err(e) => {
                         eprintln!("\n[Tokio-Main] Error reading from stdin: {e}. Shutting down...");
+                        failure = Some(e);
                         break;
                     }
                 };
@@ -480,9 +527,14 @@ pub async fn run_interactive_browser() {
                 match parse_terminal_command(&line) {
                     TerminalCmd::SpawnRenderer => {
                         let worker_id = next_worker_id;
-                        next_worker_id += 1;
+                        let Some(next_id) = next_worker_id.checked_add(1) else {
+                            eprintln!("[Tokio-Main] Renderer ID space exhausted.");
+                            print_prompt();
+                            continue;
+                        };
+                        next_worker_id = next_id;
 
-                        match IpcOneShotServer::<IpcSender<BrowserToRendererCmd>>::new() {
+                        match IpcOneShotServer::<Option<IpcSender<BrowserToRendererCmd>>>::new() {
                             Ok((server, server_name)) => {
                                 match Command::new(&current_exe)
                                     .arg("--mux-renderer")
@@ -502,13 +554,14 @@ pub async fn run_interactive_browser() {
                                                 cmd_tx: None,
                                             },
                                         );
-                                        // 使用 tokio::task::spawn_blocking 异步执行阻塞握手，主协程 0 毫秒阻塞
-                                        spawn_renderer_handshake_tokio(
+                                        // 使用 tokio::task::spawn_blocking 异步执行阻塞握手，避免阻塞运行时线程
+                                        handshake_tasks.push(spawn_renderer_handshake_tokio(
                                             worker_id,
                                             server,
+                                            server_name,
                                             ipc_ctrl_tx.clone(),
                                             ipc_event_tx.clone(),
-                                        );
+                                        ));
                                     }
                                     Err(e) => {
                                         eprintln!("[Tokio-Main] Error spawning child process: {e}");
@@ -536,12 +589,20 @@ pub async fn run_interactive_browser() {
                                 if let Some(info) = active_renderers.get(&worker_id) {
                                     if let Some(ref cmd_tx) = info.cmd_tx {
                                         let seq_id = next_seq_id;
-                                        next_seq_id += 1;
+                                        let Some(next_id) = next_seq_id.checked_add(1) else {
+                                            eprintln!("[Tokio-Main] Render sequence ID space exhausted.");
+                                            print_prompt();
+                                            continue;
+                                        };
+                                        next_seq_id = next_id;
                                         println!(
                                             "[Tokio-Main] Sending RenderUrl(seq={seq_id}, url='{url}') to Renderer #{worker_id}"
                                         );
-                                        if let Err(e) = cmd_tx.send(BrowserToRendererCmd::RenderUrl { seq_id, url }) {
-                                            eprintln!("[Tokio-Main] Failed to send command to Renderer #{worker_id}: {e}");
+                                        // IPC 发送可能因背压阻塞，在阻塞线程池中执行。
+                                        let sender = cmd_tx.clone();
+                                        match tokio::task::spawn_blocking(move || sender.send(BrowserToRendererCmd::RenderUrl { seq_id, url })).await {
+                                            Ok(Ok(())) => {}
+                                            result => eprintln!("[Tokio-Main] Failed to send command to Renderer #{worker_id}: {result:?}"),
                                         }
                                     } else {
                                         println!("[Tokio-Main] Renderer #{worker_id} is still handshaking, please wait a moment.");
@@ -581,14 +642,8 @@ pub async fn run_interactive_browser() {
                     }
 
                     TerminalCmd::KillRenderer { worker_id } => {
-                        if let Some(info) = active_renderers.get_mut(&worker_id) {
-                            if let Some(ref tx) = info.cmd_tx {
-                                println!("[Tokio-Main] Sending Shutdown signal to Renderer #{worker_id}...");
-                                let _ = tx.send(BrowserToRendererCmd::Shutdown);
-                            } else {
-                                println!("[Tokio-Main] Killing uninitialized Renderer #{worker_id}...");
-                                let _ = info.child.kill();
-                            }
+                        if let Some(info) = active_renderers.remove(&worker_id) {
+                            stop_renderer(worker_id, info, true).await;
                         } else {
                             println!("[Tokio-Main] Renderer #{worker_id} not found.");
                         }
@@ -625,6 +680,10 @@ pub async fn run_interactive_browser() {
             Some(event) = ipc_event_rx.recv() => {
                 println!();
                 match event {
+                    IpcThreadToMainEvent::IpcThreadFailed { reason } => {
+                        failure = Some(std_io::Error::other(reason));
+                        break;
+                    }
                     IpcThreadToMainEvent::HandshakeCompleted { worker_id, cmd_tx } => {
                         if let Some(info) = active_renderers.get_mut(&worker_id) {
                             info.cmd_tx = Some(cmd_tx);
@@ -633,8 +692,8 @@ pub async fn run_interactive_browser() {
                     }
                     IpcThreadToMainEvent::HandshakeFailed { worker_id, reason } => {
                         eprintln!("[Tokio-Main] Handshake failed for Renderer #{worker_id}: {reason}");
-                        if let Some(mut info) = active_renderers.remove(&worker_id) {
-                            let _ = info.child.wait();
+                        if let Some(info) = active_renderers.remove(&worker_id) {
+                            stop_renderer(worker_id, info, false).await;
                         }
                     }
                     IpcThreadToMainEvent::RendererReady { worker_id, pid } => {
@@ -651,12 +710,12 @@ pub async fn run_interactive_browser() {
                         shm_bytes,
                     } => {
                         println!(
-                            "[Tokio-Main] <<< IPC Event: Renderer #{worker_id} finished seq #{seq_id} ({url}) -> Protobuf Title: \"{title}\", Zero-Copy Shm Size: {shm_bytes} bytes"
+                            "[Tokio-Main] <<< IPC Event: Renderer #{worker_id} finished seq #{seq_id} ({url}) -> Protobuf Title: \"{title}\", Shared Memory Size: {shm_bytes} bytes"
                         );
                     }
                     IpcThreadToMainEvent::RendererDisconnected { worker_id } => {
-                        if let Some(mut info) = active_renderers.remove(&worker_id) {
-                            let _ = info.child.wait();
+                        if let Some(info) = active_renderers.remove(&worker_id) {
+                            stop_renderer(worker_id, info, false).await;
                             println!(
                                 "[Tokio-Main] <<< IPC Event: Renderer #{worker_id} disconnected and OS process reaped. Remaining Renderers: {}",
                                 active_renderers.len()
@@ -669,21 +728,66 @@ pub async fn run_interactive_browser() {
         }
     }
 
-    // 7. 退出清理阶段：向所有仍在运行的 Renderer 子进程发送 Shutdown 指令并回收进程
-    for (worker_id, mut info) in active_renderers.drain() {
-        if let Some(ref tx) = info.cmd_tx {
-            let _ = tx.send(BrowserToRendererCmd::Shutdown);
-        } else {
-            let _ = info.child.kill();
+    // 7. 回收进程与握手任务；未连接的工作进程最多等待握手看门狗的五秒窗口。
+    for (worker_id, info) in active_renderers.drain() {
+        stop_renderer(worker_id, info, true).await;
+    }
+    for task in handshake_tasks {
+        if let Err(err) = task.await {
+            eprintln!("[Tokio-Main] Handshake task failed: {err}");
         }
-        let _ = info.child.wait();
-        println!("[Tokio-Main] Renderer #{worker_id} exited cleanly.");
     }
 
-    // 8. 通知专职 IPC 线程退出并等待其线程句柄结束
-    let _ = ipc_ctrl_tx.send(MainToIpcThreadCtrl::ShutdownIpcThread);
-    let _ = ipc_thread_handle.join();
+    // 8. 阻塞的发送和线程 join 放入阻塞池；先关闭所有控制发送端，确保 IPC 线程可退出。
+    drop(ipc_event_tx);
+    tokio::task::spawn_blocking(move || {
+        if let Err(err) = ipc_ctrl_tx.send(MainToIpcThreadCtrl::ShutdownIpcThread) {
+            eprintln!("[Tokio-Main] Failed to send IPC shutdown: {err}");
+        }
+        drop(ipc_ctrl_tx);
+        if ipc_thread_handle.join().is_err() {
+            eprintln!("[Tokio-Main] IPC thread panicked.");
+        }
+    })
+    .await?;
+    if let Some(err) = failure {
+        return Err(err.into());
+    }
     println!("[Tokio-Main] Dedicated IPC thread joined. Program exited cleanly.");
+    Ok(())
+}
+
+/// 停止并回收一个 Renderer，所有同步 IPC 与进程等待都放入阻塞池。
+///
+/// `worker_id` 用于日志，`info` 转移进程所有权；`graceful` 为真时先发 Shutdown，
+/// 否则立即终止。收到关闭请求后最多等待两秒，再强制终止并 wait，避免遗留僵尸进程。
+async fn stop_renderer(worker_id: u32, mut info: RendererProcessInfo, graceful: bool) {
+    let result = tokio::task::spawn_blocking(move || -> std_io::Result<()> {
+        let requested = graceful
+            && info
+                .cmd_tx
+                .as_ref()
+                .is_some_and(|tx| tx.send(BrowserToRendererCmd::Shutdown).is_ok());
+        if requested {
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while std::time::Instant::now() < deadline {
+                if info.child.try_wait()?.is_some() {
+                    return Ok(());
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+        if info.child.try_wait()?.is_none() {
+            info.child.kill()?;
+        }
+        info.child.wait()?;
+        Ok(())
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => println!("[Tokio-Main] Renderer #{worker_id} reaped."),
+        error => eprintln!("[Tokio-Main] Failed to stop Renderer #{worker_id}: {error:?}"),
+    }
 }
 
 // ============================================================================
@@ -694,40 +798,47 @@ pub async fn run_interactive_browser() {
 ///
 /// 参数说明：
 /// - `server_name`: 主进程 `IpcOneShotServer` 生成的握手令牌字符串
-pub fn run_mux_renderer_worker(server_name: &str) {
-    let bootstrap_tx = IpcSender::connect(server_name.to_string())
-        .expect("Renderer failed to connect to bootstrap server");
-    let (cmd_tx, cmd_rx) =
-        ipc::channel::<BrowserToRendererCmd>().expect("Failed to create renderer cmd channel");
-    bootstrap_tx
-        .send(cmd_tx)
-        .expect("Failed to send renderer cmd_tx to browser");
+///
+/// 连接、初始化和发送失败返回错误；主进程关闭命令通道时正常结束。
+pub fn run_mux_renderer_worker(server_name: &str) -> DemoResult<()> {
+    let bootstrap_tx = IpcSender::connect(server_name.to_string())?;
+    let (cmd_tx, cmd_rx) = ipc::channel::<BrowserToRendererCmd>()?;
+    bootstrap_tx.send(Some(cmd_tx))?;
 
     // 1. 等待主进程下发 Init 消息（获取 worker_id 与事件上报通道 event_tx）
-    let (worker_id, event_tx) = match cmd_rx.recv().expect("Failed to receive Init command") {
+    let (worker_id, event_tx) = match cmd_rx.recv()? {
         BrowserToRendererCmd::Init {
             worker_id,
             event_tx,
         } => (worker_id, event_tx),
-        other => panic!("Unexpected first message in renderer: {other:?}"),
+        other => {
+            return Err(std_io::Error::other(format!(
+                "Unexpected first renderer message: {other:?}"
+            ))
+            .into());
+        }
     };
 
     // 2. 向主进程专职 IPC 线程上报 Ready 事件
-    event_tx
-        .send(RendererToBrowserEvent::Ready {
-            worker_id,
-            pid: std::process::id(),
-        })
-        .expect("Failed to send Ready event");
+    event_tx.send(RendererToBrowserEvent::Ready {
+        worker_id,
+        pid: std::process::id(),
+    })?;
 
     // 3. 子进程命令处理循环
-    while let Ok(cmd) = cmd_rx.recv() {
+    loop {
+        // 主进程正常关闭通道时退出；坏消息或底层 I/O 故障仍应向入口返回错误。
+        let cmd = match cmd_rx.recv() {
+            Ok(command) => command,
+            Err(ipc::IpcError::Disconnected) => break,
+            Err(err) => return Err(err.into()),
+        };
         match cmd {
             BrowserToRendererCmd::RenderUrl { seq_id, url } => {
                 // 模拟异步页面解析耗时
                 thread::sleep(Duration::from_millis(10));
 
-                // 构造 Protobuf 页面快照并写入零拷贝共享内存 IpcSharedMemory
+                // 构造 Protobuf 页面快照并写入共享内存 IpcSharedMemory
                 let payload = BenchPayload {
                     seq_id,
                     tab_id: worker_id,
@@ -742,14 +853,12 @@ pub fn run_mux_renderer_worker(server_name: &str) {
                 };
                 let shm = IpcSharedMemory::from_bytes(&payload.encode_to_vec());
 
-                event_tx
-                    .send(RendererToBrowserEvent::PageRendered {
-                        worker_id,
-                        seq_id,
-                        url,
-                        proto_shm: shm,
-                    })
-                    .expect("Failed to send PageRendered event");
+                event_tx.send(RendererToBrowserEvent::PageRendered {
+                    worker_id,
+                    seq_id,
+                    url,
+                    proto_shm: shm,
+                })?;
             }
             BrowserToRendererCmd::Shutdown => {
                 println!(
@@ -758,7 +867,10 @@ pub fn run_mux_renderer_worker(server_name: &str) {
                 );
                 break;
             }
-            BrowserToRendererCmd::Init { .. } => {}
+            BrowserToRendererCmd::Init { .. } => {
+                return Err(std_io::Error::other("Unexpected repeated Init message").into());
+            }
         }
     }
+    Ok(())
 }
