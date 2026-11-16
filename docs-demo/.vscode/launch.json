@@ -1,0 +1,15 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug log-demo",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/target/debug/log-demo",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "cargo build",
+      "terminal": "integrated"
+    }
+  ]
+}
