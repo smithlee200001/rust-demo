@@ -1,0 +1,10 @@
+[package]
+name = "serde-demo"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# 引入 serde 及其 derive 宏，用于自动派生 Serialize / Deserialize
+serde = { version = "1.0", features = ["derive"] }
+# 引入 serde_json，用于将枚举序列化为 JSON 字符串或 Value
+serde_json = "1.0"
