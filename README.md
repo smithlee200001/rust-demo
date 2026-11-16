@@ -26,7 +26,7 @@ AI 编码助手的统一协作要求见 [AGENTS.md](./AGENTS.md)。
 | --- | --- |
 | [docs-demo](./docs-demo/README.md) | 项目文档分层、AI 协作入口与生命周期管理 |
 | [http-sse](./http-sse/README.md) | HTTP/SSE 实时指标推送与模拟流式对话 |
-| [log-demo](./log-demo/README.md) | 日志级别、结构化字段与自定义日志记录器 |
+| [log-demo](./log-demo/README.md) | 日志级别、结构化字段、自定义日志记录器与子进程输出接管 |
 | [multi-processing](./multi-processing/README.md) | 多进程与进程间通信（IPC） |
 
 新增案例时，在根目录下创建对应的主题目录，并在此索引中添加文档入口。

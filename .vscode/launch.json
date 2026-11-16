@@ -1,0 +1,25 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug log-demo",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/log-demo/target/debug/log-demo",
+      "args": [],
+      "cwd": "${workspaceFolder}/log-demo",
+      "preLaunchTask": "cargo build log-demo",
+      "terminal": "integrated"
+    },
+    {
+      "name": "Debug log-demo (--child-worker)",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/log-demo/target/debug/log-demo",
+      "args": ["--child-worker"],
+      "cwd": "${workspaceFolder}/log-demo",
+      "preLaunchTask": "cargo build log-demo",
+      "terminal": "integrated"
+    }
+  ]
+}

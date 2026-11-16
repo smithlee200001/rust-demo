@@ -1,0 +1,38 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "cargo build log-demo",
+      "type": "process",
+      "command": "cargo",
+      "args": [
+        "build",
+        "--manifest-path",
+        "${workspaceFolder}/log-demo/Cargo.toml"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}/log-demo"
+      },
+      "problemMatcher": ["$rustc"],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "cargo test log-demo",
+      "type": "process",
+      "command": "cargo",
+      "args": [
+        "test",
+        "--manifest-path",
+        "${workspaceFolder}/log-demo/Cargo.toml"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}/log-demo"
+      },
+      "problemMatcher": ["$rustc"],
+      "group": "test"
+    }
+  ]
+}

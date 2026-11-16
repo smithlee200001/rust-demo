@@ -9,6 +9,9 @@
 //! 6. 子模块层级日志：演示不同子模块的默认 `target` 行为
 //! 7. 运行时动态调整 `LevelFilter`
 //! 8. `warn!` 宏配合 `serde_json::Value` 的多种用法（`{}`、`{:#}`、`{:?}`、`kv` 的 `:%` 与 `:serde`）
+//! 9. 子进程 `stdout` 与 `stderr` 接管：并发读取子进程输出流并统一路由到 `log` 系统
+
+mod child_process;
 
 use log::{
     Level, LevelFilter, Log, Metadata, Record, debug, error, info,
@@ -383,12 +386,59 @@ fn demo_serde_json_value() {
     );
 }
 
+/// 9. 演示接管子进程的 `stdout` 和 `stderr` 并统一接入 `log` 日志系统
+///
+/// 关键逻辑：
+/// 通过 `std::env::current_exe()` 启动当前二进制的 `--child-worker` 子进程模式，
+/// 使用 `child_process::run_and_log_child_process` 并发采集其标准输出与标准错误。
+fn demo_child_process_capture() {
+    info!("=== 9. Demonstrating child process stdout/stderr log capture ===");
+
+    let exe_path = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(err) => {
+            error!("Failed to resolve current executable path: {}", err);
+            return;
+        }
+    };
+
+    let mut command = std::process::Command::new(exe_path);
+    command.arg("--child-worker");
+
+    match child_process::run_and_log_child_process(&mut command, "demo_worker") {
+        Ok(summary) => {
+            info!(
+                target: "child::summary",
+                exit_code = summary.status.code().unwrap_or(-1),
+                stdout_lines = summary.stdout_lines,
+                stderr_lines = summary.stderr_lines;
+                "Completed child process output capture"
+            );
+        }
+        Err(err) => {
+            error!(
+                target: "child::summary",
+                "Failed to run and capture child process output: {}",
+                err
+            );
+        }
+    }
+}
+
 fn main() {
     // 注册全局日志记录器，并设置初始最大日志级别为 Trace
     // 边界条件：`set_logger` 在整个进程生命周期中只能成功调用一次
+    // 注意：无论是父进程还是 `--child-worker` 子进程模式，均需先初始化 `CUSTOM_LOGGER`
     log::set_logger(&CUSTOM_LOGGER)
         .expect("Failed to initialize global logger: logger was already set");
     log::set_max_level(LevelFilter::Trace);
+
+    // 若以 `--child-worker` 参数启动，则直接进入子进程模拟输出模式
+    if std::env::args().nth(1).as_deref() == Some("--child-worker") {
+        child_process::run_child_worker();
+        log::logger().flush();
+        return;
+    }
 
     info!("Starting rust-lang/log 0.4 comprehensive demonstration");
 
@@ -421,7 +471,10 @@ fn main() {
     // 8. 演示 warn! 宏配合 serde_json::Value 的各种用法
     demo_serde_json_value();
 
-    // 9. 主动刷新日志缓冲区
+    // 9. 演示接管子进程的 stdout 和 stderr
+    demo_child_process_capture();
+
+    // 10. 主动刷新日志缓冲区
     log::logger().flush();
     info!("All log demonstrations completed successfully");
 }

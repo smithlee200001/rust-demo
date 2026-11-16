@@ -12,7 +12,8 @@ log-demo/
 ├── Cargo.toml
 ├── Cargo.lock
 └── src/
-    └── main.rs        # 自定义日志记录器与各类日志示例
+    ├── main.rs            # 自定义日志记录器与各类日志示例
+    └── child_process.rs   # 子进程 stdout/stderr 并发接管与日志路由
 ```
 
 ## 运行方式
@@ -34,6 +35,7 @@ cargo run
 - 结构化键值字段，以及 `:?`、`:%` 和 `:serde` 格式。
 - 使用 `log::set_max_level` 在运行时切换全局过滤级别。
 - `serde_json::Value` 的紧凑、美化、调试和结构化输出。
+- 接管子进程的 `stdout` 和 `stderr`：通过 `std::thread::scope` 并发读取管道并路由到 `child::stdout`（`INFO`）与 `child::stderr`（`WARN`），附带 `child`、`pid` 等结构化字段。
 
 自定义记录器将结构化字段转换为可读文本，不输出完整 JSON 日志行。过滤级别由代码设置，当前不读取 `RUST_LOG` 环境变量。输出中的警告和错误是演示内容，不代表程序运行失败。
 
