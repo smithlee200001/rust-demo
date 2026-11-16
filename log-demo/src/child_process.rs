@@ -11,7 +11,7 @@
 //! 3. 无论管道读取是否出错，均会调用 `child.wait()` 回收子进程，防止产生僵尸进程。
 
 use log::{error, info, warn};
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Read};
 use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::Duration;
@@ -109,25 +109,35 @@ pub fn run_and_log_child_process(
     let (stdout_res, stderr_res) = thread::scope(|scope| {
         let stdout_handle = scope.spawn(|| {
             pump_stream(stdout_pipe, |line| {
-                info!(
-                    target: "child::stdout",
-                    child = child_name,
-                    pid;
-                    "{}",
-                    line
-                );
+                if has_custom_logger_prefix(line) {
+                    // 子进程已通过 CustomLogger 格式化输出，直接透传打印以保留原始日志等级与格式
+                    println!("{}", line);
+                } else {
+                    info!(
+                        target: "child::stdout",
+                        child = child_name,
+                        pid;
+                        "{}",
+                        line
+                    );
+                }
             })
         });
 
         let stderr_handle = scope.spawn(|| {
             pump_stream(stderr_pipe, |line| {
-                warn!(
-                    target: "child::stderr",
-                    child = child_name,
-                    pid;
-                    "{}",
-                    line
-                );
+                if has_custom_logger_prefix(line) {
+                    // 子进程已通过 CustomLogger 格式化输出，直接透传打印以保留原始日志等级与格式
+                    println!("{}", line);
+                } else {
+                    warn!(
+                        target: "child::stderr",
+                        child = child_name,
+                        pid;
+                        "{}",
+                        line
+                    );
+                }
             })
         });
 
@@ -176,39 +186,43 @@ pub fn run_and_log_child_process(
     })
 }
 
+/// 判断一行输出是否已经包含 `CustomLogger` 的日志级别前缀（如 `[INFO ]`、`[WARN ]`、`[ERROR]`）
+///
+/// 参数含义：
+/// - `line`: 从子进程管道读取到的单行文本
+///
+/// 返回值：若行首匹配 `CustomLogger` 固定的 5 字符级别前缀，则返回 `true`；否则返回 `false`。
+fn has_custom_logger_prefix(line: &str) -> bool {
+    line.starts_with("[TRACE]")
+        || line.starts_with("[DEBUG]")
+        || line.starts_with("[INFO ]")
+        || line.starts_with("[WARN ]")
+        || line.starts_with("[ERROR]")
+}
+
 /// 模拟子进程工作模式（通过 `--child-worker` 参数触发）
 ///
-/// 用途：让当前可执行文件自身充当子进程，交替向标准输出与标准错误写入多行英文消息，
-/// 从而在不依赖外部脚本或系统命令的情况下自包含地演示子进程输出接管能力。
+/// 用途：在子进程已初始化 `CustomLogger` 的前提下，直接使用 `info!`、`warn!`、`error!` 等宏
+/// 输出日志，从而演示父进程如何接管同样使用 `log` 宏的子进程输出。
 pub fn run_child_worker() {
-    let mut stdout = io::stdout();
-    let mut stderr = io::stderr();
-
-    let _ = writeln!(stdout, "Worker initialized: loading configuration");
-    let _ = stdout.flush();
+    info!("Worker initialized: loading configuration");
     thread::sleep(Duration::from_millis(15));
 
-    let _ = writeln!(
-        stderr,
-        "Deprecated environment variable detected, falling back to default"
-    );
-    let _ = stderr.flush();
+    warn!("Deprecated environment variable detected, falling back to default");
     thread::sleep(Duration::from_millis(15));
 
-    let _ = writeln!(stdout, "Processed batch #1 (128 records)");
-    let _ = stdout.flush();
+    info!(batch = 1, records = 128; "Processed batch successfully");
     thread::sleep(Duration::from_millis(15));
 
-    let _ = writeln!(
-        stderr,
+    error!(
+        node = "replica-2",
+        retryable = true;
         "Transient timeout on replica node, retrying request"
     );
-    let _ = stderr.flush();
     thread::sleep(Duration::from_millis(15));
 
-    let _ = writeln!(stdout, "Processed batch #2 (128 records)");
-    let _ = writeln!(stdout, "Worker shutting down cleanly");
-    let _ = stdout.flush();
+    info!(batch = 2, records = 128; "Processed batch successfully");
+    info!("Worker shutting down cleanly");
 }
 
 #[cfg(test)]
@@ -278,5 +292,15 @@ mod tests {
         assert_eq!(summary.status.code(), Some(42));
         assert_eq!(summary.stdout_lines, 0);
         assert_eq!(summary.stderr_lines, 1);
+    }
+
+    #[test]
+    fn has_custom_logger_prefix_matches_formatted_lines_only() {
+        assert!(has_custom_logger_prefix("[TRACE] [target: x] msg"));
+        assert!(has_custom_logger_prefix("[DEBUG] [target: x] msg"));
+        assert!(has_custom_logger_prefix("[INFO ] [target: x] msg"));
+        assert!(has_custom_logger_prefix("[WARN ] [target: x] msg"));
+        assert!(has_custom_logger_prefix("[ERROR] [target: x] msg"));
+        assert!(!has_custom_logger_prefix("plain stdout line"));
     }
 }

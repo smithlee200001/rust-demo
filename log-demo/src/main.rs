@@ -426,17 +426,19 @@ fn demo_child_process_capture() {
 }
 
 fn main() {
-    // 若以 `--child-worker` 参数启动，则直接进入子进程模拟输出模式
-    if std::env::args().nth(1).as_deref() == Some("--child-worker") {
-        child_process::run_child_worker();
-        return;
-    }
-
     // 注册全局日志记录器，并设置初始最大日志级别为 Trace
     // 边界条件：`set_logger` 在整个进程生命周期中只能成功调用一次
+    // 注意：无论是父进程还是 `--child-worker` 子进程模式，均需先初始化 `CUSTOM_LOGGER`
     log::set_logger(&CUSTOM_LOGGER)
         .expect("Failed to initialize global logger: logger was already set");
     log::set_max_level(LevelFilter::Trace);
+
+    // 若以 `--child-worker` 参数启动，则直接进入子进程模拟输出模式
+    if std::env::args().nth(1).as_deref() == Some("--child-worker") {
+        child_process::run_child_worker();
+        log::logger().flush();
+        return;
+    }
 
     info!("Starting rust-lang/log 0.4 comprehensive demonstration");
 
