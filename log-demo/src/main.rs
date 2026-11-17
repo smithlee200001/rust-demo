@@ -18,6 +18,7 @@ use log::{
     kv::{self, Key, Value, VisitSource},
     log, log_enabled, trace, warn,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fmt;
 use std::io::{self, Write};
@@ -122,14 +123,27 @@ impl Log for CustomLogger {
 /// 全局静态自定义 Logger 实例
 static CUSTOM_LOGGER: CustomLogger = CustomLogger;
 
+/// 演示用于结构化打印的用户角色枚举（使用强类型替代裸字符串，并映射为 `snake_case`）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
+enum UserRole {
+    /// 平台管理员
+    PlatformAdmin,
+    /// 普通成员
+    Member,
+    /// 访客
+    Guest,
+}
+
 /// 演示用于结构化打印的用户结构体（派生 `Debug`）
 #[derive(Debug)]
 #[allow(dead_code)]
 struct UserContext {
     /// 用户唯一 ID
     user_id: u64,
-    /// 用户角色名称
-    role: &'static str,
+    /// 用户角色
+    role: UserRole,
 }
 
 /// 演示用于结构化打印的业务错误类型（实现 `Display` 与 `Debug`）
@@ -261,7 +275,7 @@ fn demo_structured_kv() {
     // 5.2 使用 `:?` 记录实现了 Debug 的结构体
     let current_user = UserContext {
         user_id: 10086,
-        role: "platform_admin",
+        role: UserRole::PlatformAdmin,
     };
     debug!(
         user:? = current_user,
