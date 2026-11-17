@@ -1,0 +1,8 @@
+[package]
+name = "sysinfo-demo"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# 跨平台系统信息采集库（支持 macOS、Linux、Windows 等）
+sysinfo = "0.35"
