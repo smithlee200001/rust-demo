@@ -28,7 +28,7 @@ jobs:
       # 一个案例失败时仍完成其他案例，便于一次查看所有检查结果。
       fail-fast: false
       matrix:
-        demo: [http-sse, log-demo, multi-processing]
+        demo: [http-sse, log-demo, multi-processing, serde-demo, sysinfo-demo]
     defaults:
       run:
         # 根目录没有 Cargo workspace，所有 Cargo 命令在对应案例中运行。
@@ -55,3 +55,15 @@ jobs:
       - name: Test
         # 保留 Cargo 默认测试目标选择；未来新增库时也会运行文档测试。
         run: cargo test --locked
+
+  enum-state-check:
+    name: Enum State Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Scan for raw-string state candidates
+        # 对全仓所有 .rs 文件执行裸字符串状态字段/分支初筛，发现候选时以非零状态码失败。
+        run: python3 .agents/skills/rust-enum-state-check/scripts/scan_enum_candidates.py --fail-on-findings .
