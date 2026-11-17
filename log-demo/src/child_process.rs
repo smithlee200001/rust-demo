@@ -110,8 +110,8 @@ pub fn run_and_log_child_process(
         let stdout_handle = scope.spawn(|| {
             pump_stream(stdout_pipe, |line| {
                 if has_custom_logger_prefix(line) {
-                    // 子进程已通过 CustomLogger 格式化输出，直接透传打印以保留原始日志等级与格式
-                    println!("{}", line);
+                    // 保留子进程原格式，但必须经过父进程统一的文件/脱敏写入路径。
+                    crate::emit_line(line);
                 } else {
                     info!(
                         target: "child::stdout",
@@ -127,8 +127,8 @@ pub fn run_and_log_child_process(
         let stderr_handle = scope.spawn(|| {
             pump_stream(stderr_pipe, |line| {
                 if has_custom_logger_prefix(line) {
-                    // 子进程已通过 CustomLogger 格式化输出，直接透传打印以保留原始日志等级与格式
-                    println!("{}", line);
+                    // 保留子进程原格式，但必须经过父进程统一的文件/脱敏写入路径。
+                    crate::emit_line(line);
                 } else {
                     warn!(
                         target: "child::stderr",
@@ -205,7 +205,12 @@ fn has_custom_logger_prefix(line: &str) -> bool {
 /// 用途：在子进程已初始化 `CustomLogger` 的前提下，直接使用 `info!`、`warn!`、`error!` 等宏
 /// 输出日志，从而演示父进程如何接管同样使用 `log` 宏的子进程输出。
 pub fn run_child_worker() {
-    info!("Worker initialized: loading configuration");
+    info!("Worker initialized: loading configuration at /Users/demo_child_user/config");
+    // 用 Debug 产生双反斜线，覆盖父进程转发时对转义路径的处理。
+    warn!(
+        "Worker synthetic Windows path: {:?}",
+        r"C:\Users\demo_child_windows\config"
+    );
     thread::sleep(Duration::from_millis(15));
 
     warn!("Deprecated environment variable detected, falling back to default");

@@ -18,10 +18,13 @@ use log::{
     kv::{self, Key, Value, VisitSource},
     log, log_enabled, trace, warn,
 };
+use log_demo::file_log::{FileLog, Mode};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fmt;
 use std::io::{self, Write};
+use std::path::PathBuf;
+use std::sync::Mutex;
 
 /// 自定义结构化键值对收集器
 ///
@@ -92,36 +95,191 @@ impl Log for CustomLogger {
         let file = record.file().unwrap_or("unknown");
         let line = record.line().unwrap_or(0);
 
-        if kv_collector.buffer.is_empty() {
-            println!(
-                "[{:<5}] [target: {:<22}] ({}:{}) {}",
-                record.level(),
-                record.target(),
-                file,
-                line,
-                record.args()
-            );
-        } else {
-            println!(
-                "[{:<5}] [target: {:<22}] ({}:{}) {} {{ {} }}",
-                record.level(),
-                record.target(),
-                file,
-                line,
-                record.args(),
-                kv_collector.buffer
-            );
+        let mut text = format!(
+            "[{:<5}] [target: {:<22}] ({}:{}) {}",
+            record.level(),
+            record.target(),
+            file,
+            line,
+            record.args()
+        );
+        if !kv_collector.buffer.is_empty() {
+            use std::fmt::Write as _;
+            let _ = write!(text, " {{ {} }}", kv_collector.buffer);
         }
+        emit_line(&text);
     }
 
-    /// 刷新标准输出缓冲区，确保所有日志都已写入终端
+    /// 刷新当前去向的缓冲区；加密文件仍需要在退出前显式完成写入。
     fn flush(&self) {
-        let _ = io::stdout().flush();
+        match &mut *DESTINATION.lock().unwrap_or_else(|e| e.into_inner()) {
+            Destination::Console => {
+                let _ = io::stdout().flush();
+            }
+            Destination::File(output) if output.error.is_none() => {
+                output.error = output.writer.flush().err();
+            }
+            _ => {}
+        }
     }
 }
 
-/// 全局静态自定义 Logger 实例
+/// 全局静态自定义 Logger 实例。
 static CUSTOM_LOGGER: CustomLogger = CustomLogger;
+
+/// 文件失败后保留首个错误，不把后续日志回退到控制台。
+struct FileOutput {
+    writer: FileLog,
+    error: Option<io::Error>,
+}
+
+/// 父进程普通记录和子进程转发共用一条串行输出路径。
+enum Destination {
+    Console,
+    File(Box<FileOutput>),
+    Closed,
+}
+
+static DESTINATION: Mutex<Destination> = Mutex::new(Destination::Console);
+
+/// 写入一条已格式化记录。保留子进程原有级别和格式，同时不能跳过脱敏和加密。
+fn emit_line(line: &str) {
+    match &mut *DESTINATION.lock().unwrap_or_else(|e| e.into_inner()) {
+        Destination::Console => {
+            let _ = writeln!(io::stdout().lock(), "{line}");
+        }
+        Destination::File(output) if output.error.is_none() => {
+            output.error = output.writer.append(line).err();
+        }
+        _ => {}
+    }
+}
+
+/// 所有生产者退出后关闭写入器，使错误能影响进程退出码。
+fn finish_output() -> io::Result<()> {
+    let destination = {
+        let mut output = DESTINATION.lock().unwrap_or_else(|e| e.into_inner());
+        std::mem::replace(&mut *output, Destination::Closed)
+    };
+    if let Destination::File(output) = destination {
+        if let Some(error) = output.error {
+            // 部分写入过的加密流不尝试继续修补；显式返回失败。
+            return Err(error);
+        }
+        output.writer.finish()?;
+    }
+    Ok(())
+}
+
+const USAGE: &str = "Usage: log-demo [--file PATH [--encryption plain|symmetric|asymmetric] [--recipient AGE_PUBLIC_KEY] [--no-redact]]";
+
+/// 命令行加密选项只在边界解析为枚举，口令不出现在参数或环境变量中。
+#[derive(Clone, Copy)]
+enum Algorithm {
+    Plain,
+    Symmetric,
+    Asymmetric,
+}
+
+enum CommandLine {
+    Help,
+    Child,
+    Console,
+    File {
+        path: PathBuf,
+        key: Mode,
+        redact: bool,
+    },
+}
+
+fn invalid(message: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, message)
+}
+
+/// 校验参数，各项仅允许指定一次。不认识的选项不会静默降级。
+fn parse_args() -> io::Result<CommandLine> {
+    let mut args = std::env::args_os().skip(1).peekable();
+    if args.peek().is_none() {
+        return Ok(CommandLine::Console);
+    }
+    if args.peek().and_then(|s| s.to_str()) == Some("--help") {
+        args.next();
+        return if args.next().is_none() {
+            Ok(CommandLine::Help)
+        } else {
+            Err(invalid(USAGE))
+        };
+    }
+    if args.peek().and_then(|s| s.to_str()) == Some("--child-worker") {
+        args.next();
+        return if args.next().is_none() {
+            Ok(CommandLine::Child)
+        } else {
+            Err(invalid(USAGE))
+        };
+    }
+    let mut path = None;
+    let mut algorithm = None;
+    let mut public_key = None;
+    let mut redact = true;
+    while let Some(flag) = args.next() {
+        match flag.to_str() {
+            Some("--file") if path.is_none() => {
+                let value = args.next().ok_or_else(|| invalid("Missing file path"))?;
+                if value.is_empty() || value.to_str().is_some_and(|s| s.starts_with("--")) {
+                    return Err(invalid("Missing file path"));
+                }
+                path = Some(PathBuf::from(value));
+            }
+            Some("--encryption") if algorithm.is_none() => {
+                algorithm = Some(
+                    match args.next().as_deref().and_then(std::ffi::OsStr::to_str) {
+                        Some("plain") => Algorithm::Plain,
+                        Some("symmetric") => Algorithm::Symmetric,
+                        Some("asymmetric") => Algorithm::Asymmetric,
+                        _ => return Err(invalid("Unknown or missing encryption option")),
+                    },
+                );
+            }
+            Some("--recipient") if public_key.is_none() => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| invalid("Missing age public recipient"))?;
+                public_key = Some(
+                    value
+                        .to_str()
+                        .and_then(|s| s.parse::<age::x25519::Recipient>().ok())
+                        .ok_or_else(|| invalid("Invalid age X25519 public recipient"))?,
+                );
+            }
+            Some("--no-redact") if redact => redact = false,
+            _ => return Err(invalid(USAGE)),
+        }
+    }
+    let path = path.ok_or_else(|| invalid("File options require --file PATH"))?;
+    let key = match (algorithm.unwrap_or(Algorithm::Plain), public_key) {
+        (Algorithm::Plain, None) => Mode::Plain,
+        (Algorithm::Symmetric, None) => {
+            let secret = rpassword::prompt_password("Log encryption passphrase: ")?;
+            let secret = age::secrecy::SecretString::from(secret);
+            use age::secrecy::ExposeSecret as _;
+            if secret.expose_secret().trim().is_empty() {
+                return Err(invalid("Log encryption passphrase must not be blank"));
+            }
+            Mode::Symmetric(secret)
+        }
+        (Algorithm::Asymmetric, Some(recipient)) => Mode::Asymmetric(recipient),
+        (Algorithm::Asymmetric, None) => {
+            return Err(invalid("Asymmetric encryption requires --recipient"));
+        }
+        _ => {
+            return Err(invalid(
+                "--recipient is only valid for asymmetric encryption",
+            ));
+        }
+    };
+    Ok(CommandLine::File { path, key, redact })
+}
 
 /// 演示用于结构化打印的用户角色枚举（使用强类型替代裸字符串，并映射为 `snake_case`）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -271,6 +429,8 @@ fn demo_structured_kv() {
         is_vip;
         "Order checkout completed successfully"
     );
+
+    info!(path = "/home/demo_linux_user/report.txt"; "Read a synthetic report path");
 
     // 5.2 使用 `:?` 记录实现了 Debug 的结构体
     let current_user = UserContext {
@@ -439,19 +599,32 @@ fn demo_child_process_capture() {
     }
 }
 
-fn main() {
-    // 注册全局日志记录器，并设置初始最大日志级别为 Trace
-    // 边界条件：`set_logger` 在整个进程生命周期中只能成功调用一次
-    // 注意：无论是父进程还是 `--child-worker` 子进程模式，均需先初始化 `CUSTOM_LOGGER`
-    log::set_logger(&CUSTOM_LOGGER)
-        .expect("Failed to initialize global logger: logger was already set");
-    log::set_max_level(LevelFilter::Trace);
+fn main() -> io::Result<()> {
+    let command = parse_args()?;
+    let child = matches!(command, CommandLine::Child);
+    match command {
+        CommandLine::Help => {
+            println!("{USAGE}");
+            return Ok(());
+        }
+        CommandLine::File { path, key, redact } => {
+            let writer = FileLog::create(&path, key, redact)?;
+            *DESTINATION.lock().unwrap_or_else(|e| e.into_inner()) =
+                Destination::File(Box::new(FileOutput {
+                    writer,
+                    error: None,
+                }));
+        }
+        _ => {}
+    }
 
-    // 若以 `--child-worker` 参数启动，则直接进入子进程模拟输出模式
-    if std::env::args().nth(1).as_deref() == Some("--child-worker") {
+    // 子进程只写自己的管道；父进程统一处理文件。仅命令行选中文件时关闭控制台镜像。
+    log::set_logger(&CUSTOM_LOGGER).map_err(io::Error::other)?;
+    log::set_max_level(LevelFilter::Trace);
+    if child {
         child_process::run_child_worker();
         log::logger().flush();
-        return;
+        return Ok(());
     }
 
     info!("Starting rust-lang/log 0.4 comprehensive demonstration");
@@ -488,7 +661,8 @@ fn main() {
     // 9. 演示接管子进程的 stdout 和 stderr
     demo_child_process_capture();
 
-    // 10. 主动刷新日志缓冲区
-    log::logger().flush();
+    // 最后一条也必须在完成加密流之前写入；若落盘失败由进程返回非零退出码。
     info!("All log demonstrations completed successfully");
+    log::logger().flush();
+    finish_output()
 }
