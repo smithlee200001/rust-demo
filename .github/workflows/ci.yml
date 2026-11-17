@@ -21,14 +21,22 @@ env:
 
 jobs:
   check:
-    name: Check (${{ matrix.demo }})
-    runs-on: ubuntu-latest
+    # 保留 Linux 检查的原名称，避免影响已有的分支保护规则。
+    name: ${{ matrix.runner == 'ubuntu-latest' && format('Check ({0})', matrix.demo) || format('Check ({0}, {1})', matrix.demo, matrix.runner) }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
       # 一个案例失败时仍完成其他案例，便于一次查看所有检查结果。
       fail-fast: false
       matrix:
         demo: [http-sse, log-demo, multi-processing, serde-demo, sysinfo-demo]
+        runner: [ubuntu-latest]
+        # 仅日志案例增加原生平台验证，其他案例保留现有 Linux 检查。
+        include:
+          - demo: log-demo
+            runner: macos-latest
+          - demo: log-demo
+            runner: windows-latest
     defaults:
       run:
         # 根目录没有 Cargo workspace，所有 Cargo 命令在对应案例中运行。
