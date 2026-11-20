@@ -39,7 +39,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "register-demo"
+name = "register-tools-demo"
 version = "0.1.0"
 dependencies = [
  "serde",

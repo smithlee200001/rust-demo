@@ -14,7 +14,7 @@ rust-demo/
 ├── http-sse/              # HTTP/SSE 实时推送案例，包含独立的 README 和 Cargo 工程
 ├── log-demo/              # 日志用法案例，包含独立的 README 和 Cargo 工程
 ├── multi-processing/      # 多进程通信案例，包含独立的 README 和 Cargo 工程
-├── register-demo/         # 工具注册与统一管理案例，包含独立的 README 和 Cargo 工程
+├── register-tools-demo/         # 工具注册与统一管理案例，包含独立的 README 和 Cargo 工程
 ├── serde-demo/            # Serde 枚举与字符串互转案例，包含独立的 README 和 Cargo 工程
 └── sysinfo-demo/          # 跨平台系统信息采集案例，包含独立的 README 和 Cargo 工程
 ```
@@ -31,7 +31,7 @@ AI 编码助手的统一协作要求见 [AGENTS.md](./AGENTS.md)。
 | [http-sse](./http-sse/README.md) | HTTP/SSE 实时指标推送与模拟流式对话 |
 | [log-demo](./log-demo/README.md) | 日志级别、结构化字段、自定义日志记录器与子进程输出接管 |
 | [multi-processing](./multi-processing/README.md) | 多进程与进程间通信（IPC） |
-| [register-demo](./register-demo/README.md) | 工具接口、分组注册、只读注册中心与异步调用 |
+| [register-tools-demo](./register-tools-demo/README.md) | 工具接口、分组注册、只读注册中心与异步调用 |
 | [serde-demo](./serde-demo/README.md) | 使用 Serde 将枚举转换为字符串及反序列化 |
 | [sysinfo-demo](./sysinfo-demo/README.md) | 跨平台 CPU、内存与操作系统版本采集（`sysinfo`） |
 

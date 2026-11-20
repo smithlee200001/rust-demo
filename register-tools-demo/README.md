@@ -53,7 +53,7 @@ tests/registry.rs      # 调用方视角的行为与边界测试
 从仓库根目录执行：
 
 ```bash
-cd register-demo
+cd register-tools-demo
 cargo run
 cargo run -- text.echo '{"text":"Hello, registry!"}'
 cargo run -- math.add '{"left":20,"right":22}'
@@ -65,7 +65,7 @@ cargo run -- catalog.lookup '{"key":"missing"}'
 
 无参数时按名称列出工具，并依次执行全部五个工具。指定工具时，输出包含 `request_id` 和 `data` 的 JSON。示例请求 ID 固定为 `demo-request`。
 
-以下命令在 `register-demo` 目录执行，用于观察错误，预期返回非零退出码：
+以下命令在 `register-tools-demo` 目录执行，用于观察错误，预期返回非零退出码：
 
 ```bash
 cargo run -- missing.tool '{}'
@@ -77,7 +77,7 @@ cargo run -- math.add '{"left":9223372036854775807,"right":1}'
 
 `src/tools/ids.rs` 集中定义并公开稳定的 `&str` 常量，工具描述、示例和测试的调用点共用这些常量，避免重复拼写 ID：
 
-| 常量（位于 `register_demo::tools::ids`） | ID |
+| 常量（位于 `register_tools_demo::tools::ids`） | ID |
 | --- | --- |
 | `TEXT_ECHO_ID` | `text.echo` |
 | `TEXT_STATS_ID` | `text.stats` |
@@ -88,7 +88,7 @@ cargo run -- math.add '{"left":9223372036854775807,"right":1}'
 下面的函数展示其他模块如何调用文本统计工具：
 
 ```rust
-use register_demo::{
+use register_tools_demo::{
     registry::ToolRegistry,
     tool::{ToolContext, ToolError, ToolOutput},
     tools::ids::TEXT_STATS_ID,
@@ -118,7 +118,7 @@ async fn count_text(
 
 ## 验证
 
-在 `register-demo` 目录执行：
+在 `register-tools-demo` 目录执行：
 
 ```bash
 cargo fmt

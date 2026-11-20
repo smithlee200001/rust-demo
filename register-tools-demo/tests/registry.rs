@@ -1,6 +1,6 @@
 //! 从调用方视角验证注册、查找、执行及错误边界，不依赖注册中心内部结构。
 
-use register_demo::{
+use register_tools_demo::{
     registry::RegistryBuilder,
     tool::{ToolContext, ToolError, ToolId},
     tools::{
@@ -267,7 +267,7 @@ async fn divides_integers_safely() -> Result<(), ToolError> {
 /// 注入自定义数据验证工具没有写死默认目录，同时区分空值、未命中和大小写。
 #[tokio::test]
 async fn looks_up_injected_catalog() -> Result<(), ToolError> {
-    use register_demo::tools::catalog;
+    use register_tools_demo::tools::catalog;
     use std::{collections::BTreeMap, sync::Arc};
 
     let entries = Arc::new(BTreeMap::from([
