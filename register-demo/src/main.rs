@@ -2,7 +2,13 @@
 
 use std::{env, error::Error, io};
 
-use register_demo::{tool::ToolContext, tools::register_all_tools};
+use register_demo::{
+    tool::ToolContext,
+    tools::{
+        ids::{CATALOG_LOOKUP_ID, MATH_ADD_ID, MATH_DIVIDE_ID, TEXT_ECHO_ID, TEXT_STATS_ID},
+        register_all_tools,
+    },
+};
 use serde_json::json;
 
 /// 支持无参数演示或 `<tool-name> '<json>'`；失败交由 main 返回非零退出码。
@@ -24,11 +30,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 );
             }
             for (name, input) in [
-                ("text.echo", json!({"text": "Hello, tools!"})),
-                ("math.add", json!({"left": 20, "right": 22})),
-                ("text.stats", json!({"text": "Hello 世界"})),
-                ("math.divide", json!({"dividend": 17, "divisor": 5})),
-                ("catalog.lookup", json!({"key": "rust"})),
+                (TEXT_ECHO_ID, json!({"text": "Hello, tools!"})),
+                (MATH_ADD_ID, json!({"left": 20, "right": 22})),
+                (TEXT_STATS_ID, json!({"text": "Hello 世界"})),
+                (MATH_DIVIDE_ID, json!({"dividend": 17, "divisor": 5})),
+                (CATALOG_LOOKUP_ID, json!({"key": "rust"})),
             ] {
                 let output = registry.execute(name, &context, input).await?;
                 println!("Result for {name}: {}", serde_json::to_string(&output)?);

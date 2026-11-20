@@ -3,6 +3,8 @@
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use super::ids::{MATH_ADD_ID, MATH_DIVIDE_ID};
+
 use crate::{
     registry::RegistryBuilder,
     tool::{Tool, ToolContext, ToolDescriptor, ToolError, ToolFuture, ToolId, ToolOutput},
@@ -23,7 +25,7 @@ impl Tool for AddTool {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             // 固定工具名属于源码不变量，启动期检查可及时发现开发错误。
-            id: ToolId::new("math.add").expect("Built-in tool ID must be valid"),
+            id: ToolId::new(MATH_ADD_ID).expect("Built-in tool ID must be valid"),
             description: "Add two signed 64-bit integers with overflow checking.".to_owned(),
             input_schema: json!({"type": "object", "properties": {"left": {"type": "integer", "minimum": i64::MIN, "maximum": i64::MAX}, "right": {"type": "integer", "minimum": i64::MIN, "maximum": i64::MAX}}, "required": ["left", "right"], "additionalProperties": false}),
         }
@@ -59,7 +61,7 @@ struct DivideArguments {
 impl Tool for DivideTool {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
-            id: ToolId::new("math.divide").expect("Built-in tool ID must be valid"),
+            id: ToolId::new(MATH_DIVIDE_ID).expect("Built-in tool ID must be valid"),
             description: "Divide signed 64-bit integers, returning quotient and remainder."
                 .to_owned(),
             input_schema: json!({"type": "object", "properties": {"dividend": {"type": "integer", "minimum": i64::MIN, "maximum": i64::MAX}, "divisor": {"type": "integer", "minimum": i64::MIN, "maximum": i64::MAX, "not": {"const": 0}}}, "required": ["dividend", "divisor"], "additionalProperties": false}),

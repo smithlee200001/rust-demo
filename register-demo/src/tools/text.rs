@@ -3,6 +3,8 @@
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use super::ids::{TEXT_ECHO_ID, TEXT_STATS_ID};
+
 use crate::{
     registry::RegistryBuilder,
     tool::{Tool, ToolContext, ToolDescriptor, ToolError, ToolFuture, ToolId, ToolOutput},
@@ -22,7 +24,7 @@ impl Tool for EchoTool {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             // 固定标识由开发者维护；失败说明源码常量错误，应在启动时终止。
-            id: ToolId::new("text.echo").expect("Built-in tool ID must be valid"),
+            id: ToolId::new(TEXT_ECHO_ID).expect("Built-in tool ID must be valid"),
             description: "Return the supplied text (up to 4096 UTF-8 bytes).".to_owned(),
             input_schema: json!({"type": "object", "properties": {"text": {"type": "string", "description": "At most 4096 UTF-8 bytes"}}, "required": ["text"], "additionalProperties": false}),
         }
@@ -52,7 +54,7 @@ pub struct TextStatsTool;
 impl Tool for TextStatsTool {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
-            id: ToolId::new("text.stats").expect("Built-in tool ID must be valid"),
+            id: ToolId::new(TEXT_STATS_ID).expect("Built-in tool ID must be valid"),
             description: "Count UTF-8 bytes, Unicode scalar values and whitespace-separated words."
                 .to_owned(),
             input_schema: json!({"type": "object", "properties": {"text": {"type": "string", "description": "At most 4096 UTF-8 bytes"}}, "required": ["text"], "additionalProperties": false}),
