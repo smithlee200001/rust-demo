@@ -26,6 +26,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             for (name, input) in [
                 ("text.echo", json!({"text": "Hello, tools!"})),
                 ("math.add", json!({"left": 20, "right": 22})),
+                ("text.stats", json!({"text": "Hello 世界"})),
+                ("math.divide", json!({"dividend": 17, "divisor": 5})),
+                ("catalog.lookup", json!({"key": "rust"})),
             ] {
                 let output = registry.execute(name, &context, input).await?;
                 println!("Result for {name}: {}", serde_json::to_string(&output)?);

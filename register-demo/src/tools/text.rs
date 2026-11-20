@@ -46,7 +46,40 @@ impl Tool for EchoTool {
     }
 }
 
+/// 文本统计工具；字符数采用 Unicode 标量值计数，不等同于用户感知的字形数。
+pub struct TextStatsTool;
+
+impl Tool for TextStatsTool {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            id: ToolId::new("text.stats").expect("Built-in tool ID must be valid"),
+            description: "Count UTF-8 bytes, Unicode scalar values and whitespace-separated words."
+                .to_owned(),
+            input_schema: json!({"type": "object", "properties": {"text": {"type": "string", "description": "At most 4096 UTF-8 bytes"}}, "required": ["text"], "additionalProperties": false}),
+        }
+    }
+
+    fn execute<'a>(&'a self, context: &'a ToolContext, arguments: Value) -> ToolFuture<'a> {
+        Box::pin(async move {
+            // 与回显工具使用相同的文本输入契约，空文本的三项计数均为零。
+            let args: EchoArguments = serde_json::from_value(arguments)
+                .map_err(|error| ToolError::InvalidArguments(error.to_string()))?;
+            if args.text.len() > 4096 {
+                return Err(ToolError::InvalidArguments(
+                    "text exceeds 4096 UTF-8 bytes".to_owned(),
+                ));
+            }
+            Ok(ToolOutput {
+                request_id: context.request_id.clone(),
+                // split_whitespace 识别 Unicode 空白，不对中文执行自然语言分词。
+                data: json!({"bytes": args.text.len(), "chars": args.text.chars().count(), "words": args.text.split_whitespace().count()}),
+            })
+        })
+    }
+}
+
 /// 注册文本组工具；将名称冲突传播给启动流程处理。
 pub fn register_tools(builder: &mut RegistryBuilder) -> Result<(), ToolError> {
-    builder.register(EchoTool)
+    builder.register(EchoTool)?;
+    builder.register(TextStatsTool)
 }

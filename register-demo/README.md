@@ -29,6 +29,7 @@ src/
 ├── registry.rs        # 注册构建器和只读注册中心
 └── tools/
     ├── mod.rs         # 集中组装所有分组
+    ├── catalog.rs     # 注入共享目录的查询工具组
     ├── text.rs        # 文本工具组
     └── math.rs        # 数学工具组
 tests/registry.rs      # 调用方视角的行为与边界测试
@@ -40,8 +41,11 @@ tests/registry.rs      # 调用方视角的行为与边界测试
 | --- | --- | --- | --- |
 | `text.echo` | `{"text":"hello"}` | `{"text":"hello"}` | 允许空文本，最多 4096 个 UTF-8 字节 |
 | `math.add` | `{"left":20,"right":22}` | `{"sum":42}` | 两个 i64，使用 checked_add 检查溢出 |
+| `text.stats` | `{"text":"Hello 世界"}` | `{"bytes":12,"chars":8,"words":2}` | 最多 4096 个 UTF-8 字节；字符按 Unicode 标量值计数，词按 Unicode 空白分隔 |
+| `math.divide` | `{"dividend":17,"divisor":5}` | `{"quotient":3,"remainder":2}` | i64 整数除法，商向零截断；除零为参数错误，MIN / -1 为执行错误 |
+| `catalog.lookup` | `{"key":"rust"}` | `{"key":"rust","found":true,"value":"A systems programming language."}` | 键为 1–64 个 UTF-8 字节，区分大小写且不裁剪空白；未命中返回 found=false、value=null |
 
-两个工具都是真实的内存运算，不使用模拟网络响应。参数字段必填，拒绝未知字段及类型不符的输入。`input_schema` 供调用方发现和展示；注册中心没有通用 JSON Schema 验证器，运行时由具体工具反序列化并检查业务边界。文本长度按字节限制，通过字段描述说明，未使用按字符计数的 `maxLength` 冒充字节限制。
+五个工具均执行真实的内存运算。目录工具的数据是启动时注入的演示数据，包含 `rust` 和 `tokio` 两项，不连接数据库或网络。可通过 `LookupTool::new(Arc<BTreeMap<String, String>>)` 或目录组的 `register_tools()` 注入自己的只读目录；所有者释放句柄后工具仍持有数据，空目录也有效。文本统计不执行自然语言分词，组合音标和 emoji 序列可能包含多个标量值。参数字段必填，拒绝未知字段及类型不符的输入。`input_schema` 供调用方发现和展示；注册中心没有通用 JSON Schema 验证器，运行时由具体工具反序列化并检查业务边界。文本长度按字节限制，通过字段描述说明，未使用按字符计数的 `maxLength` 冒充字节限制。
 
 ## 运行
 
@@ -52,9 +56,13 @@ cd register-demo
 cargo run
 cargo run -- text.echo '{"text":"Hello, registry!"}'
 cargo run -- math.add '{"left":20,"right":22}'
+cargo run -- text.stats '{"text":"Hello 世界"}'
+cargo run -- math.divide '{"dividend":17,"divisor":5}'
+cargo run -- catalog.lookup '{"key":"rust"}'
+cargo run -- catalog.lookup '{"key":"missing"}'
 ```
 
-无参数时按名称列出工具，并依次执行回显和求和。指定工具时，输出包含 `request_id` 和 `data` 的 JSON。示例请求 ID 固定为 `demo-request`。
+无参数时按名称列出工具，并依次执行全部五个工具。指定工具时，输出包含 `request_id` 和 `data` 的 JSON。示例请求 ID 固定为 `demo-request`。
 
 以下命令在 `register-demo` 目录执行，用于观察错误，预期返回非零退出码：
 
@@ -84,7 +92,7 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-测试覆盖名称校验、空注册中心、稳定列举、重复注册、未知工具、调用分发、请求 ID、UTF-8 字节限制、参数错误、整数溢出和共享句柄生命周期。
+测试覆盖名称校验、空注册中心、稳定列举、重复注册、未知工具、调用分发、请求 ID、UTF-8 字节限制、参数错误、整数溢出、整数除法截断与除零、Unicode 文本统计、注入目录的精确匹配和共享句柄生命周期。
 
 ## 限制
 
