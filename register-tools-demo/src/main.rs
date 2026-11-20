@@ -2,7 +2,7 @@
 
 use std::{env, error::Error, io};
 
-use register_demo::{
+use register_tools_demo::{
     tool::ToolContext,
     tools::{
         ids::{CATALOG_LOOKUP_ID, MATH_ADD_ID, MATH_DIVIDE_ID, TEXT_ECHO_ID, TEXT_STATS_ID},
@@ -49,7 +49,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         _ => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "Usage: register-demo [<tool-name> '<json-arguments>']",
+                "Usage: register-tools-demo [<tool-name> '<json-arguments>']",
             )
             .into());
         }
