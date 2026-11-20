@@ -44,7 +44,16 @@ fn lists_and_looks_up_tools() -> Result<(), ToolError> {
         .iter()
         .map(|item| item.id.to_string())
         .collect();
-    assert_eq!(names, ["math.add", "text.echo"]);
+    assert_eq!(
+        names,
+        [
+            "catalog.lookup",
+            "math.add",
+            "math.divide",
+            "text.echo",
+            "text.stats"
+        ]
+    );
     assert!(registry.get("text.echo").is_ok());
     assert!(matches!(
         registry.get("missing.tool"),
@@ -161,5 +170,141 @@ async fn tool_handle_outlives_registry() -> Result<(), ToolError> {
     drop(registry);
     let output = tool.execute(&context(), json!({"text": "alive"})).await?;
     assert_eq!(output.data, json!({"text": "alive"}));
+    Ok(())
+}
+
+/// 验证 Unicode 标量值与字节的差异；组合音标算两个标量值，空白用于分词。
+#[tokio::test]
+async fn counts_text_and_validates_limits() -> Result<(), ToolError> {
+    let registry = register_all_tools()?;
+    for (text, expected) in [
+        ("", json!({"bytes": 0, "chars": 0, "words": 0})),
+        ("你 好\n", json!({"bytes": 8, "chars": 4, "words": 2})),
+        ("e\u{301}", json!({"bytes": 3, "chars": 2, "words": 1})),
+        ("a\u{3000}b", json!({"bytes": 5, "chars": 3, "words": 2})),
+    ] {
+        let output = registry
+            .execute("text.stats", &context(), json!({"text": text}))
+            .await?;
+        assert_eq!(output.data, expected);
+        assert_eq!(output.request_id, "test-request");
+    }
+    let output = registry
+        .execute("text.stats", &context(), json!({"text": "a".repeat(4096)}))
+        .await?;
+    assert_eq!(
+        output.data,
+        json!({"bytes": 4096, "chars": 4096, "words": 1})
+    );
+    for input in [
+        json!({}),
+        json!({"text": false}),
+        json!({"text": "ok", "extra": 1}),
+        json!({"text": "你".repeat(1366)}),
+    ] {
+        assert!(matches!(
+            registry.execute("text.stats", &context(), input).await,
+            Err(ToolError::InvalidArguments(_))
+        ));
+    }
+    Ok(())
+}
+
+/// 验证正负整数的截断规则、合法极值，以及除零和 MIN / -1 的不同错误类型。
+#[tokio::test]
+async fn divides_integers_safely() -> Result<(), ToolError> {
+    let registry = register_all_tools()?;
+    for (dividend, divisor, quotient, remainder) in [
+        (17, 5, 3, 2),
+        (-17, 5, -3, -2),
+        (17, -5, -3, 2),
+        (0, 1, 0, 0),
+        (i64::MIN, 1, i64::MIN, 0),
+    ] {
+        let output = registry
+            .execute(
+                "math.divide",
+                &context(),
+                json!({"dividend": dividend, "divisor": divisor}),
+            )
+            .await?;
+        assert_eq!(
+            output.data,
+            json!({"quotient": quotient, "remainder": remainder})
+        );
+        assert_eq!(output.request_id, "test-request");
+    }
+    for input in [
+        json!({"dividend": 1, "divisor": 0}),
+        json!({"dividend": 1}),
+        json!({"dividend": "1", "divisor": 2}),
+        json!({"dividend": 1, "divisor": 2, "extra": 0}),
+        json!({"dividend": u64::MAX, "divisor": 1}),
+    ] {
+        assert!(matches!(
+            registry.execute("math.divide", &context(), input).await,
+            Err(ToolError::InvalidArguments(_))
+        ));
+    }
+    assert!(matches!(
+        registry
+            .execute(
+                "math.divide",
+                &context(),
+                json!({"dividend": i64::MIN, "divisor": -1})
+            )
+            .await,
+        Err(ToolError::ExecutionFailed(_))
+    ));
+    Ok(())
+}
+
+/// 注入自定义数据验证工具没有写死默认目录，同时区分空值、未命中和大小写。
+#[tokio::test]
+async fn looks_up_injected_catalog() -> Result<(), ToolError> {
+    use register_demo::tools::catalog;
+    use std::{collections::BTreeMap, sync::Arc};
+
+    let entries = Arc::new(BTreeMap::from([
+        ("custom".to_owned(), "injected value".to_owned()),
+        ("empty".to_owned(), String::new()),
+        ("a".repeat(64), "boundary".to_owned()),
+    ]));
+    let mut builder = RegistryBuilder::default();
+    catalog::register_tools(&mut builder, Arc::clone(&entries))?;
+    drop(entries);
+    let registry = builder.build();
+    for (key, value) in [
+        ("custom", Some("injected value")),
+        ("empty", Some("")),
+        ("Custom", None),
+        ("missing", None),
+    ] {
+        let output = registry
+            .execute("catalog.lookup", &context(), json!({"key": key}))
+            .await?;
+        assert_eq!(
+            output.data,
+            json!({"key": key, "found": value.is_some(), "value": value})
+        );
+        assert_eq!(output.request_id, "test-request");
+    }
+    let output = registry
+        .execute("catalog.lookup", &context(), json!({"key": "a".repeat(64)}))
+        .await?;
+    assert_eq!(output.data["value"], "boundary");
+    for input in [
+        json!({}),
+        json!({"key": ""}),
+        json!({"key": 1}),
+        json!({"key": "custom", "extra": true}),
+        json!({"key": "a".repeat(65)}),
+        json!({"key": "你".repeat(22)}),
+    ] {
+        assert!(matches!(
+            registry.execute("catalog.lookup", &context(), input).await,
+            Err(ToolError::InvalidArguments(_))
+        ));
+    }
     Ok(())
 }

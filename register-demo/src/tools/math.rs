@@ -45,7 +45,50 @@ impl Tool for AddTool {
     }
 }
 
+/// 整数除法工具；商向零截断，余数与被除数同号或为零。
+pub struct DivideTool;
+
+/// 除数和被除数均为 i64；除数不能为零，未知字段被拒绝。
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DivideArguments {
+    dividend: i64,
+    divisor: i64,
+}
+
+impl Tool for DivideTool {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            id: ToolId::new("math.divide").expect("Built-in tool ID must be valid"),
+            description: "Divide signed 64-bit integers, returning quotient and remainder."
+                .to_owned(),
+            input_schema: json!({"type": "object", "properties": {"dividend": {"type": "integer", "minimum": i64::MIN, "maximum": i64::MAX}, "divisor": {"type": "integer", "minimum": i64::MIN, "maximum": i64::MAX, "not": {"const": 0}}}, "required": ["dividend", "divisor"], "additionalProperties": false}),
+        }
+    }
+
+    fn execute<'a>(&'a self, context: &'a ToolContext, arguments: Value) -> ToolFuture<'a> {
+        Box::pin(async move {
+            let args: DivideArguments = serde_json::from_value(arguments)
+                .map_err(|error| ToolError::InvalidArguments(error.to_string()))?;
+            if args.divisor == 0 {
+                return Err(ToolError::InvalidArguments(
+                    "divisor must not be zero".to_owned(),
+                ));
+            }
+            // MIN / -1 的数学结果超出 i64；先检查除法，成功后取余才不会 panic。
+            let quotient = args.dividend.checked_div(args.divisor).ok_or_else(|| {
+                ToolError::ExecutionFailed("integer division overflow".to_owned())
+            })?;
+            Ok(ToolOutput {
+                request_id: context.request_id.clone(),
+                data: json!({"quotient": quotient, "remainder": args.dividend % args.divisor}),
+            })
+        })
+    }
+}
+
 /// 注册数学组工具；不忽略或覆盖重复注册错误。
 pub fn register_tools(builder: &mut RegistryBuilder) -> Result<(), ToolError> {
-    builder.register(AddTool)
+    builder.register(AddTool)?;
+    builder.register(DivideTool)
 }
