@@ -29,6 +29,7 @@ src/
 ├── registry.rs        # 注册构建器和只读注册中心
 └── tools/
     ├── mod.rs         # 集中组装所有分组
+    ├── ids.rs         # 统一定义所有内置工具 ID
     ├── catalog.rs     # 注入共享目录的查询工具组
     ├── text.rs        # 文本工具组
     └── math.rs        # 数学工具组
@@ -72,10 +73,45 @@ cargo run -- text.echo '{"text":123}'
 cargo run -- math.add '{"left":9223372036854775807,"right":1}'
 ```
 
+## 在其他模块引用工具 ID
+
+`src/tools/ids.rs` 集中定义并公开稳定的 `&str` 常量，工具描述、示例和测试的调用点共用这些常量，避免重复拼写 ID：
+
+| 常量（位于 `register_demo::tools::ids`） | ID |
+| --- | --- |
+| `TEXT_ECHO_ID` | `text.echo` |
+| `TEXT_STATS_ID` | `text.stats` |
+| `MATH_ADD_ID` | `math.add` |
+| `MATH_DIVIDE_ID` | `math.divide` |
+| `CATALOG_LOOKUP_ID` | `catalog.lookup` |
+
+下面的函数展示其他模块如何调用文本统计工具：
+
+```rust
+use register_demo::{
+    registry::ToolRegistry,
+    tool::{ToolContext, ToolError, ToolOutput},
+    tools::ids::TEXT_STATS_ID,
+};
+use serde_json::json;
+
+/// 使用公共标识调用文本统计工具，返回统计结果或查找、参数校验错误。
+async fn count_text(
+    registry: &ToolRegistry,
+    context: &ToolContext,
+) -> Result<ToolOutput, ToolError> {
+    registry
+        .execute(TEXT_STATS_ID, context, json!({"text": "Hello 世界"}))
+        .await
+}
+```
+
+`get(TEXT_STATS_ID)` 同样可直接使用常量。需要在字段或映射键中保存强类型标识时，使用 `ToolId::new(TEXT_STATS_ID)?` 转换；它只校验格式，工具是否已注册由注册中心查询确认。命令行和外部 JSON 仍使用原有字符串名称，不受此改动影响。
+
 ## 增加工具
 
 1. 在 `src/tools/` 的相应功能模块定义结构体，实现 `Tool`。
-2. `descriptor()` 提供稳定唯一的名称及与实际行为一致的参数描述。
+2. 在 `src/tools/ids.rs` 中声明带中文文档的公共 ID 常量（例如 `TEXT_STATS_ID`），由 `descriptor()` 和调用方统一引用，并提供与实际行为一致的参数描述。
 3. `execute()` 将 JSON 转成独立参数结构体，校验边界后返回 `ToolOutput`；错误使用 `ToolError`，消息使用英文。
 4. 在所属模块的 `register_tools()` 中注册；如果增加分组，在 `register_all_tools()` 中调用新分组。
 5. 补充可观察行为和失败边界测试。

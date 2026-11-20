@@ -3,7 +3,11 @@
 use register_demo::{
     registry::RegistryBuilder,
     tool::{ToolContext, ToolError, ToolId},
-    tools::{register_all_tools, text::EchoTool},
+    tools::{
+        ids::{CATALOG_LOOKUP_ID, MATH_ADD_ID, MATH_DIVIDE_ID, TEXT_ECHO_ID, TEXT_STATS_ID},
+        register_all_tools,
+        text::EchoTool,
+    },
 };
 use serde_json::json;
 
@@ -44,6 +48,7 @@ fn lists_and_looks_up_tools() -> Result<(), ToolError> {
         .iter()
         .map(|item| item.id.to_string())
         .collect();
+    // 保留协议名称的字面值断言，防止修改常量时无意改变外部调用契约。
     assert_eq!(
         names,
         [
@@ -54,7 +59,7 @@ fn lists_and_looks_up_tools() -> Result<(), ToolError> {
             "text.stats"
         ]
     );
-    assert!(registry.get("text.echo").is_ok());
+    assert!(registry.get(TEXT_ECHO_ID).is_ok());
     assert!(matches!(
         registry.get("missing.tool"),
         Err(ToolError::ToolNotFound(_))
@@ -75,7 +80,7 @@ async fn duplicate_registration_preserves_original() -> Result<(), ToolError> {
     let registry = builder.build();
     assert_eq!(registry.list().len(), 1);
     let output = registry
-        .execute("text.echo", &context(), json!({"text": "still available"}))
+        .execute(TEXT_ECHO_ID, &context(), json!({"text": "still available"}))
         .await?;
     assert_eq!(output.data, json!({"text": "still available"}));
     Ok(())
@@ -86,7 +91,7 @@ async fn duplicate_registration_preserves_original() -> Result<(), ToolError> {
 async fn dispatches_tools() -> Result<(), ToolError> {
     let registry = register_all_tools()?;
     let output = registry
-        .execute("math.add", &context(), json!({"left": -2, "right": 44}))
+        .execute(MATH_ADD_ID, &context(), json!({"left": -2, "right": 44}))
         .await?;
     assert_eq!(output.data, json!({"sum": 42}));
     assert_eq!(output.request_id, "test-request");
@@ -105,7 +110,7 @@ async fn validates_text_arguments() -> Result<(), ToolError> {
     let registry = register_all_tools()?;
     for text in [String::new(), "a".repeat(4096), "你".repeat(1365)] {
         let output = registry
-            .execute("text.echo", &context(), json!({"text": text}))
+            .execute(TEXT_ECHO_ID, &context(), json!({"text": text}))
             .await?;
         assert_eq!(output.data, json!({"text": text}));
     }
@@ -118,7 +123,7 @@ async fn validates_text_arguments() -> Result<(), ToolError> {
         json!({"text": "你".repeat(1366)}),
     ] {
         assert!(matches!(
-            registry.execute("text.echo", &context(), input).await,
+            registry.execute(TEXT_ECHO_ID, &context(), input).await,
             Err(ToolError::InvalidArguments(_))
         ));
     }
@@ -131,7 +136,7 @@ async fn validates_math_arguments_and_overflow() -> Result<(), ToolError> {
     let registry = register_all_tools()?;
     for value in [i64::MIN, i64::MAX] {
         let output = registry
-            .execute("math.add", &context(), json!({"left": value, "right": 0}))
+            .execute(MATH_ADD_ID, &context(), json!({"left": value, "right": 0}))
             .await?;
         assert_eq!(output.data, json!({"sum": value}));
     }
@@ -139,7 +144,7 @@ async fn validates_math_arguments_and_overflow() -> Result<(), ToolError> {
         assert!(matches!(
             registry
                 .execute(
-                    "math.add",
+                    MATH_ADD_ID,
                     &context(),
                     json!({"left": left, "right": right})
                 )
@@ -155,7 +160,7 @@ async fn validates_math_arguments_and_overflow() -> Result<(), ToolError> {
         json!({"left": 1, "right": 2, "extra": 3}),
     ] {
         assert!(matches!(
-            registry.execute("math.add", &context(), input).await,
+            registry.execute(MATH_ADD_ID, &context(), input).await,
             Err(ToolError::InvalidArguments(_))
         ));
     }
@@ -166,7 +171,7 @@ async fn validates_math_arguments_and_overflow() -> Result<(), ToolError> {
 #[tokio::test]
 async fn tool_handle_outlives_registry() -> Result<(), ToolError> {
     let registry = register_all_tools()?;
-    let tool = registry.get("text.echo")?;
+    let tool = registry.get(TEXT_ECHO_ID)?;
     drop(registry);
     let output = tool.execute(&context(), json!({"text": "alive"})).await?;
     assert_eq!(output.data, json!({"text": "alive"}));
@@ -184,13 +189,13 @@ async fn counts_text_and_validates_limits() -> Result<(), ToolError> {
         ("a\u{3000}b", json!({"bytes": 5, "chars": 3, "words": 2})),
     ] {
         let output = registry
-            .execute("text.stats", &context(), json!({"text": text}))
+            .execute(TEXT_STATS_ID, &context(), json!({"text": text}))
             .await?;
         assert_eq!(output.data, expected);
         assert_eq!(output.request_id, "test-request");
     }
     let output = registry
-        .execute("text.stats", &context(), json!({"text": "a".repeat(4096)}))
+        .execute(TEXT_STATS_ID, &context(), json!({"text": "a".repeat(4096)}))
         .await?;
     assert_eq!(
         output.data,
@@ -203,7 +208,7 @@ async fn counts_text_and_validates_limits() -> Result<(), ToolError> {
         json!({"text": "你".repeat(1366)}),
     ] {
         assert!(matches!(
-            registry.execute("text.stats", &context(), input).await,
+            registry.execute(TEXT_STATS_ID, &context(), input).await,
             Err(ToolError::InvalidArguments(_))
         ));
     }
@@ -223,7 +228,7 @@ async fn divides_integers_safely() -> Result<(), ToolError> {
     ] {
         let output = registry
             .execute(
-                "math.divide",
+                MATH_DIVIDE_ID,
                 &context(),
                 json!({"dividend": dividend, "divisor": divisor}),
             )
@@ -242,14 +247,14 @@ async fn divides_integers_safely() -> Result<(), ToolError> {
         json!({"dividend": u64::MAX, "divisor": 1}),
     ] {
         assert!(matches!(
-            registry.execute("math.divide", &context(), input).await,
+            registry.execute(MATH_DIVIDE_ID, &context(), input).await,
             Err(ToolError::InvalidArguments(_))
         ));
     }
     assert!(matches!(
         registry
             .execute(
-                "math.divide",
+                MATH_DIVIDE_ID,
                 &context(),
                 json!({"dividend": i64::MIN, "divisor": -1})
             )
@@ -281,7 +286,7 @@ async fn looks_up_injected_catalog() -> Result<(), ToolError> {
         ("missing", None),
     ] {
         let output = registry
-            .execute("catalog.lookup", &context(), json!({"key": key}))
+            .execute(CATALOG_LOOKUP_ID, &context(), json!({"key": key}))
             .await?;
         assert_eq!(
             output.data,
@@ -290,7 +295,11 @@ async fn looks_up_injected_catalog() -> Result<(), ToolError> {
         assert_eq!(output.request_id, "test-request");
     }
     let output = registry
-        .execute("catalog.lookup", &context(), json!({"key": "a".repeat(64)}))
+        .execute(
+            CATALOG_LOOKUP_ID,
+            &context(),
+            json!({"key": "a".repeat(64)}),
+        )
         .await?;
     assert_eq!(output.data["value"], "boundary");
     for input in [
@@ -302,7 +311,7 @@ async fn looks_up_injected_catalog() -> Result<(), ToolError> {
         json!({"key": "你".repeat(22)}),
     ] {
         assert!(matches!(
-            registry.execute("catalog.lookup", &context(), input).await,
+            registry.execute(CATALOG_LOOKUP_ID, &context(), input).await,
             Err(ToolError::InvalidArguments(_))
         ));
     }

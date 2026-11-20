@@ -5,6 +5,8 @@ use std::{collections::BTreeMap, sync::Arc};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use super::ids::CATALOG_LOOKUP_ID;
+
 use crate::{
     registry::RegistryBuilder,
     tool::{Tool, ToolContext, ToolDescriptor, ToolError, ToolFuture, ToolId, ToolOutput},
@@ -33,7 +35,7 @@ struct LookupArguments {
 impl Tool for LookupTool {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
-            id: ToolId::new("catalog.lookup").expect("Built-in tool ID must be valid"),
+            id: ToolId::new(CATALOG_LOOKUP_ID).expect("Built-in tool ID must be valid"),
             description: "Look up an exact, case-sensitive key in the injected in-memory catalog."
                 .to_owned(),
             input_schema: json!({"type": "object", "properties": {"key": {"type": "string", "minLength": 1, "description": "At most 64 UTF-8 bytes; exact case-sensitive match"}}, "required": ["key"], "additionalProperties": false}),

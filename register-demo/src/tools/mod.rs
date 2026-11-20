@@ -1,6 +1,8 @@
 //! 按功能分组注册；增加工具时在对应模块实现接口，并加入该组的显式注册清单。
 
 pub mod catalog;
+/// 统一公开内置工具标识，避免调用方依赖具体实现模块。
+pub mod ids;
 pub mod math;
 pub mod text;
 
